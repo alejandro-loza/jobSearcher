@@ -239,7 +239,7 @@ async def linkedin_messages_task():
 
             # 3. Obtener mensajes completos y guardarlos en DB
             full_msgs = await asyncio.to_thread(
-                linkedin_messages_tool.get_full_conversation, conv_id
+                linkedin_messages_tool.get_full_conversation, conv_id, sender_name
             )
             new_msgs = 0
             latest_recruiter_msg = ""
@@ -364,7 +364,7 @@ async def linkedin_messages_task():
             draft = analysis.get("draft_response", "")
             if draft:
                 sent = await asyncio.to_thread(
-                    linkedin_messages_tool.send_message, conv_id, draft
+                    linkedin_messages_tool.send_message, conv_id, draft, sender_name
                 )
                 if sent:
                     tracker.record_our_reply(conv_id, draft)
@@ -710,11 +710,11 @@ async def lifespan(app: FastAPI):
         minute=0,
         id="followup",
     )
-    # LinkedIn messages: cada 6 horas
+    # LinkedIn messages: cada 5 minutos (listener autónomo)
     scheduler.add_job(
         linkedin_messages_task,
         "interval",
-        hours=6,
+        minutes=5,
         id="linkedin_messages",
     )
     # LinkedIn content: genera 1 post diario (inspector lo revisará antes de publicar)
