@@ -173,6 +173,32 @@ def post_to_linkedin(text: str, image_path: Optional[str] = None) -> bool:
                 continue
 
         if not posted:
+            # Debug: screenshot + dump visible buttons
+            try:
+                page.screenshot(path="data/screenshots/post_debug_buttons.png")
+                btns = page.locator('button').all()
+                for b in btns[:30]:
+                    try:
+                        txt = b.inner_text(timeout=500).strip()
+                        if txt:
+                            logger.info(f"[linkedin_post] visible button: '{txt[:60]}'")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Last resort: try any primary button in the modal
+            try:
+                modal_primary = page.locator('.artdeco-modal button.artdeco-button--primary').first
+                if modal_primary.is_visible(timeout=2000):
+                    btn_text = modal_primary.inner_text(timeout=1000).strip()
+                    logger.info(f"[linkedin_post] Clicking modal primary button: '{btn_text}'")
+                    modal_primary.click()
+                    posted = True
+            except Exception:
+                pass
+
+        if not posted:
             logger.error("[linkedin_post] Could not find Post/Publicar button")
             return False
 
