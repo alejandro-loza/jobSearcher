@@ -540,6 +540,21 @@ async def image_inspection_task():
         logger.error(f"Error en image_inspection_task: {e}")
 
 
+async def linkedin_cookie_refresh_task():
+    """Renueva cookies de LinkedIn automáticamente via login."""
+    logger.info("Renovando cookies de LinkedIn...")
+    try:
+        success = await asyncio.to_thread(
+            linkedin_messages_tool.refresh_cookies
+        )
+        if success:
+            logger.success("Cookies de LinkedIn renovadas automáticamente")
+        else:
+            logger.warning("No se pudieron renovar cookies de LinkedIn")
+    except Exception as e:
+        logger.error(f"Error renovando cookies LinkedIn: {e}")
+
+
 async def followup_task():
     """Envía follow-up emails a aplicaciones sin respuesta."""
     logger.info("Revisando aplicaciones para follow-up...")
@@ -745,6 +760,13 @@ async def lifespan(app: FastAPI):
         minute=30,
         day_of_week="mon-fri",
         id="image_inspection",
+    )
+    # Renovar cookies de LinkedIn automáticamente cada 12h
+    scheduler.add_job(
+        linkedin_cookie_refresh_task,
+        "interval",
+        hours=12,
+        id="linkedin_cookie_refresh",
     )
 
     scheduler.start()

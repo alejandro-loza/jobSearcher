@@ -100,6 +100,356 @@ async def _linkedin_upload_resume(page: Page, abs_cv: Path, already_uploaded: bo
     return False
 
 
+async def _linkedin_easy_apply(
+    page: Page,
+    resume: Dict,
+    abs_cv: Path,
+    cover_letter: str = "",
+) -> Dict[str, Any]:
+    """
+    Dedicated LinkedIn Easy Apply handler.
+    Handles the multi-step modal flow without relying on LLM for navigation.
+    Returns: {success: bool, status: str, message: str}
+    """
+    # Step 1: Click "Easy Apply" / "Solicitud sencilla" button
+    easy_apply_clicked = False
+    for sel in [
+        'button.jobs-apply-button',
+        'button:has-text("Easy Apply")',
+        'button:has-text("Solicitud sencilla")',
+        'button[aria-label*="Easy Apply"]',
+        'button[aria-label*="Solicitud sencilla"]',
+        '.jobs-apply-button--top-card button',
+    ]:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                easy_apply_clicked = True
+                logger.info(f"LinkedIn Easy Apply: clicked via {sel}")
+                await page.wait_for_timeout(2000)
+                break
+        except Exception:
+            continue
+
+    if not easy_apply_clicked:
+        # Check if already in the modal or already applied
+        page_text = await page.evaluate("() => document.body.innerText")
+        if any(w in page_text.lower() for w in ["already applied", "ya aplicaste", "ya has enviado"]):
+            return {"success": False, "status": "done", "message": "Already applied to this job"}
+        return {"success": False, "status": "error", "message": "Could not find Easy Apply button"}
+
+    # Step 2: Navigate through modal steps
+    max_modal_steps = 10
+    cv_uploaded = False
+
+    for modal_step in range(max_modal_steps):
+        await page.wait_for_timeout(1500)
+
+        # Get modal text to understand current step
+        modal_text = ""
+        try:
+            modal = page.locator('.artdeco-modal, .jobs-easy-apply-modal, [role="dialog"]').first
+            if await modal.is_visible(timeout=3000):
+                modal_text = (await modal.inner_text())[:2000].lower()
+        except Exception:
+            modal_text = (await page.evaluate("() => document.body.innerText"))[:2000].lower()
+
+        logger.info(f"LinkedIn Easy Apply step {modal_step + 1}, modal text: {modal_text[:100]}...")
+
+        # Check if we've completed (success page)
+        if any(w in modal_text for w in [
+            "application sent", "candidatura enviada", "solicitud enviada",
+            "you applied", "has enviado tu solicitud", "your application was sent",
+        ]):
+            return {"success": True, "status": "success", "message": "LinkedIn Easy Apply submitted successfully"}
+
+        # Try to upload CV on resume step
+        if not cv_uploaded and any(w in modal_text for w in ["resume", "cv", "currículum", "curriculum"]):
+            cv_uploaded = await _linkedin_upload_resume(page, abs_cv, cv_uploaded)
+            if cv_uploaded:
+                logger.info(f"LinkedIn Easy Apply: CV uploaded at step {modal_step + 1}")
+
+        # Also try upload on any step (LinkedIn might have file input)
+        if not cv_uploaded:
+            try:
+                file_inputs = page.locator('input[type="file"]')
+                if await file_inputs.count() > 0 and abs_cv.exists():
+                    await file_inputs.first.set_input_files(str(abs_cv))
+                    cv_uploaded = True
+                    logger.info(f"LinkedIn Easy Apply: CV uploaded via file input at step {modal_step + 1}")
+            except Exception:
+                pass
+
+        # Fill common fields using LinkedIn's specific patterns
+        await _linkedin_fill_modal_fields(page, resume, cover_letter, modal_text)
+
+        # Try to click "Next" / "Siguiente" / "Review" / "Revisar"
+        next_clicked = False
+        for next_sel in [
+            'button[aria-label="Continue to next step"]',
+            'button[aria-label="Continuar al siguiente paso"]',
+            'button[aria-label="Review your application"]',
+            'button[aria-label="Revisar tu solicitud"]',
+            'button:has-text("Next")',
+            'button:has-text("Siguiente")',
+            'button:has-text("Review")',
+            'button:has-text("Revisar")',
+            'button:has-text("Continue")',
+            'button:has-text("Continuar")',
+        ]:
+            try:
+                btn = page.locator(next_sel).first
+                if await btn.is_visible(timeout=1000) and await btn.is_enabled(timeout=500):
+                    await btn.click()
+                    next_clicked = True
+                    logger.info(f"LinkedIn Easy Apply: clicked '{next_sel}' at step {modal_step + 1}")
+                    await page.wait_for_timeout(1500)
+                    break
+            except Exception:
+                continue
+
+        # If no "Next", try "Submit" / "Enviar candidatura"
+        if not next_clicked:
+            for submit_sel in [
+                'button[aria-label="Submit application"]',
+                'button[aria-label="Enviar candidatura"]',
+                'button:has-text("Submit application")',
+                'button:has-text("Enviar candidatura")',
+                'button:has-text("Submit")',
+                'button:has-text("Enviar")',
+            ]:
+                try:
+                    btn = page.locator(submit_sel).first
+                    if await btn.is_visible(timeout=1000) and await btn.is_enabled(timeout=500):
+                        await btn.click()
+                        logger.info(f"LinkedIn Easy Apply: clicked SUBMIT '{submit_sel}'")
+                        await page.wait_for_timeout(3000)
+
+                        # Check if submission was successful
+                        post_text = (await page.evaluate("() => document.body.innerText"))[:1000].lower()
+                        if any(w in post_text for w in [
+                            "application sent", "candidatura enviada", "solicitud enviada",
+                            "your application was sent",
+                        ]):
+                            return {"success": True, "status": "success", "message": "LinkedIn Easy Apply submitted"}
+                        # Even if we don't see confirmation text, if we clicked submit, assume success
+                        return {"success": True, "status": "success", "message": "LinkedIn Easy Apply submit clicked"}
+                except Exception:
+                    continue
+
+        # If neither Next nor Submit worked, check for dismiss/close scenarios
+        if not next_clicked:
+            # Check for error messages requiring field fixes
+            error_msgs = page.locator('.artdeco-inline-feedback--error, .fb-dash-form-element__error-field')
+            if await error_msgs.count() > 0:
+                error_text = await error_msgs.first.inner_text()
+                logger.warning(f"LinkedIn Easy Apply: form error at step {modal_step + 1}: {error_text}")
+                # Use LLM to fill required fields based on error
+                await _linkedin_fill_with_llm(page, resume, cover_letter, modal_text)
+                # Try Next again after fix
+                for next_sel in ['button:has-text("Next")', 'button:has-text("Siguiente")']:
+                    try:
+                        btn = page.locator(next_sel).first
+                        if await btn.is_visible(timeout=1000):
+                            await btn.click()
+                            break
+                    except Exception:
+                        continue
+            else:
+                logger.warning(f"LinkedIn Easy Apply: stuck at step {modal_step + 1}, no Next/Submit found")
+                # Last resort: use LLM vision
+                await _linkedin_fill_with_llm(page, resume, cover_letter, modal_text)
+
+    return {"success": False, "status": "error", "message": "LinkedIn Easy Apply: exceeded max steps"}
+
+
+async def _linkedin_fill_modal_fields(
+    page: Page,
+    resume: Dict,
+    cover_letter: str,
+    modal_text: str,
+) -> None:
+    """Fill common LinkedIn Easy Apply modal fields without LLM."""
+    field_map = {
+        "phone": resume.get("phone", "+52 56 4144 6948"),
+        "mobile": resume.get("phone", "+52 56 4144 6948"),
+        "teléfono": resume.get("phone", "+52 56 4144 6948"),
+        "city": "Ciudad de México",
+        "ciudad": "Ciudad de México",
+    }
+
+    # Fill text inputs by label matching
+    inputs = page.locator('input[type="text"], input:not([type])')
+    count = await inputs.count()
+    for i in range(min(count, 15)):
+        try:
+            inp = inputs.nth(i)
+            if not await inp.is_visible(timeout=500):
+                continue
+            # Get the associated label or placeholder
+            label = await inp.evaluate("""el => {
+                let label = el.closest('div')?.querySelector('label')?.innerText || '';
+                return label || el.placeholder || el.getAttribute('aria-label') || '';
+            }""")
+            label_lower = label.lower().strip()
+
+            # Skip already filled fields
+            current_val = await inp.input_value()
+            if current_val.strip():
+                continue
+
+            # Match known fields
+            filled = False
+            for key, val in field_map.items():
+                if key in label_lower:
+                    await inp.fill(val)
+                    logger.debug(f"LinkedIn auto-fill: '{label}' = '{val}'")
+                    filled = True
+                    break
+
+            # Years of experience
+            if not filled and any(w in label_lower for w in ["years", "años", "experience"]):
+                await inp.fill("12")
+                logger.debug(f"LinkedIn auto-fill: '{label}' = '12'")
+
+            # Salary
+            if not filled and any(w in label_lower for w in ["salary", "salario", "compensation"]):
+                await inp.fill("Negotiable")
+                logger.debug(f"LinkedIn auto-fill: '{label}' = 'Negotiable'")
+
+            # How did you hear
+            if not filled and any(w in label_lower for w in ["hear about", "enteraste", "cómo supiste"]):
+                await inp.fill("LinkedIn")
+
+            # LinkedIn URL
+            if not filled and any(w in label_lower for w in ["linkedin", "profile url"]):
+                await inp.fill(resume.get("linkedin_url", "https://www.linkedin.com/in/alejandro-hernandez-loza/"))
+
+            # Website / Portfolio
+            if not filled and any(w in label_lower for w in ["website", "portfolio", "github"]):
+                await inp.fill(resume.get("github_url", "https://github.com/alejandro-loza"))
+
+        except Exception:
+            continue
+
+    # Fill textareas (cover letter, additional info)
+    textareas = page.locator('textarea')
+    ta_count = await textareas.count()
+    for i in range(min(ta_count, 5)):
+        try:
+            ta = textareas.nth(i)
+            if not await ta.is_visible(timeout=500):
+                continue
+            current_val = await ta.input_value()
+            if current_val.strip():
+                continue
+            label = await ta.evaluate("""el => {
+                let label = el.closest('div')?.querySelector('label')?.innerText || '';
+                return label || el.placeholder || el.getAttribute('aria-label') || '';
+            }""")
+            if cover_letter:
+                await ta.fill(cover_letter[:3000])
+                logger.debug(f"LinkedIn auto-fill textarea: '{label[:30]}' with cover letter")
+            else:
+                summary = resume.get("experience_summary", resume.get("summary", ""))
+                if summary:
+                    await ta.fill(summary[:3000])
+        except Exception:
+            continue
+
+    # Handle select/dropdown fields
+    selects = page.locator('select')
+    sel_count = await selects.count()
+    for i in range(min(sel_count, 10)):
+        try:
+            sel = selects.nth(i)
+            if not await sel.is_visible(timeout=500):
+                continue
+            label = await sel.evaluate("""el => {
+                let label = el.closest('div')?.querySelector('label')?.innerText || '';
+                return label || el.getAttribute('aria-label') || '';
+            }""")
+            label_lower = label.lower()
+            # Try common answers
+            if any(w in label_lower for w in ["gender", "género"]):
+                await sel.select_option(label="Prefer not to say")
+            elif any(w in label_lower for w in ["veteran", "disability", "discapacidad"]):
+                await sel.select_option(label="Prefer not to say")
+            elif any(w in label_lower for w in ["authorization", "autorización", "work permit"]):
+                await sel.select_option(label="Yes")
+            elif any(w in label_lower for w in ["sponsor", "visa"]):
+                await sel.select_option(label="No")
+        except Exception:
+            continue
+
+    # Handle radio buttons — check first option that says "Yes" for work authorization
+    radios = page.locator('input[type="radio"]')
+    radio_count = await radios.count()
+    for i in range(min(radio_count, 10)):
+        try:
+            radio = radios.nth(i)
+            label = await radio.evaluate("""el => {
+                let label = el.closest('label')?.innerText || el.nextElementSibling?.innerText || '';
+                return label;
+            }""")
+            group_label = await radio.evaluate("""el => {
+                let fieldset = el.closest('fieldset');
+                return fieldset?.querySelector('legend')?.innerText || '';
+            }""")
+            group_lower = group_label.lower()
+
+            # Work authorization questions - answer Yes
+            if any(w in group_lower for w in ["authorized", "autorizado", "legally"]):
+                if "yes" in label.lower() or "sí" in label.lower():
+                    await radio.check()
+            # Sponsorship questions - answer No
+            elif any(w in group_lower for w in ["sponsor", "visa"]):
+                if "no" in label.lower():
+                    await radio.check()
+        except Exception:
+            continue
+
+
+async def _linkedin_fill_with_llm(
+    page: Page,
+    resume: Dict,
+    cover_letter: str,
+    modal_text: str,
+) -> None:
+    """Fallback: use LLM to analyze and fill remaining fields."""
+    try:
+        img_b64 = await _screenshot_b64(page, 99)
+        prompt = f"""You are filling out a LinkedIn Easy Apply form. Here is the current modal content:
+{modal_text[:1500]}
+
+Candidate info:
+- Name: {resume.get('full_name', 'Alejandro Hernandez Loza')}
+- Email: {resume.get('email', 'alejandrohloza@gmail.com')}
+- Phone: {resume.get('phone', '+52 56 4144 6948')}
+- Location: Ciudad de México, México
+- Years experience: 12
+- Work authorization: Yes (Mexican citizen)
+- Visa sponsorship needed: Yes (for USA/EU)
+
+Return JSON with actions to fill remaining empty fields:
+{{"actions": [{{"type": "fill", "selector": "CSS selector or label", "value": "value to fill"}}]}}
+Return ONLY JSON."""
+
+        content = await asyncio.to_thread(_invoke_page_analysis, prompt)
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        result = json.loads(content)
+        for action in result.get("actions", []):
+            await _execute_action(page, action)
+            await page.wait_for_timeout(300)
+    except Exception as e:
+        logger.debug(f"LinkedIn LLM fill fallback failed: {e}")
+
+
 def _invoke_page_analysis(prompt: str) -> str:
     """Invoca el LLM para analizar páginas. Usa el coordinator con fallback completo."""
     return coordinator.invoke("browser_vision", [HumanMessage(content=prompt)], temperature=0.3, max_tokens=2048)
@@ -458,6 +808,20 @@ async def apply_to_job_url(
             abs_cv = (_Path("/data/projects/proyects/jobSearcher") / cv_pdf_path).resolve()
             cv_uploaded = False
 
+            # LinkedIn Easy Apply: use dedicated handler
+            if "linkedin.com" in job_url:
+                result = await _linkedin_easy_apply(page, resume, abs_cv, cover_letter)
+                if result.get("success") or result.get("status") == "done":
+                    return {
+                        "success": result.get("success", False),
+                        "status": result.get("status", "done"),
+                        "message": result.get("message", ""),
+                        "screenshot_path": str(SCREENSHOTS_DIR / f"final_{int(time.time())}.png"),
+                        "url": job_url,
+                    }
+                # If LinkedIn handler failed, fall through to generic handler
+                logger.warning(f"LinkedIn Easy Apply handler failed: {result.get('message')}, trying generic flow")
+
             # Auto-upload: si hay input[type=file] visible, subir CV inmediatamente
             try:
                 file_inputs = page.locator('input[type="file"]')
@@ -468,12 +832,6 @@ async def apply_to_job_url(
                     history.append("Auto-uploaded CV/Resume PDF")
             except Exception as e:
                 logger.debug(f"No file input en primera carga: {e}")
-
-            # LinkedIn Easy Apply: manejar botón de upload de resume
-            if "linkedin.com" in job_url:
-                cv_uploaded = await _linkedin_upload_resume(page, abs_cv, cv_uploaded)
-                if cv_uploaded:
-                    history.append("LinkedIn: CV/Resume uploaded")
 
             for step in range(MAX_STEPS):
                 analysis = await _analyze_page(page, resume, step, history, cv_pdf_path, cover_letter)
@@ -550,10 +908,6 @@ async def apply_to_job_url(
                                 logger.info(f"Auto-upload CV en paso {step+1}")
                     except Exception:
                         pass
-
-                    # LinkedIn-specific upload en cada paso
-                    if not cv_uploaded and "linkedin.com" in job_url:
-                        cv_uploaded = await _linkedin_upload_resume(page, abs_cv, cv_uploaded)
 
                 # Esperar carga de página
                 try:
