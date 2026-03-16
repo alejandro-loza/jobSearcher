@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment Variables
+.env
+.env.local
+
+# Config (credentials, cookies)
+config/linkedin_cookies.json
+config/google_credentials.json
+config/google_token.json
+config/linkedin_profile.json
+
+# Logs
+logs/
+*.log
+
+# Database
+data/
+*.db
+*.sqlite
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WhatsApp session
+.wwebjs_auth/
+
+# Node modules
+node_modules/
+services/whatsapp/node_modules/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json

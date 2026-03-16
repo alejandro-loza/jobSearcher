@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Orchestrator Python (FastAPI + scheduler)
+  orchestrator:
+    build: .
+    container_name: jobsearcher-orchestrator
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - ./.env:/app/.env
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    command: uvicorn src.orchestrator:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - jobsearcher-network
+    depends_on:
+      - whatsapp-bridge
+    restart: unless-stopped
+
+  # WhatsApp Bridge (Node.js)
+  whatsapp-bridge:
+    image: node:20-slim
+    container_name: jobsearcher-whatsapp
+    working_dir: /app
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./services/whatsapp:/app
+      - whatsapp_auth:/app/.wwebjs_auth
+    environment:
+      - BRIDGE_PORT=3001
+      - ORCHESTRATOR_URL=http://orchestrator:8000
+      - WHATSAPP_MY_NUMBER=${WHATSAPP_MY_NUMBER}
+    command: sh -c "npm install && npm start"
+    networks:
+      - jobsearcher-network
+    restart: unless-stopped
+
+networks:
+  jobsearcher-network:
+    driver: bridge
+
+volumes:
+  whatsapp_auth:
