@@ -111,7 +111,7 @@ async def _linkedin_easy_apply(
     Handles the multi-step modal flow without relying on LLM for navigation.
     Returns: {success: bool, status: str, message: str}
     """
-    # Step 1: Click "Easy Apply" / "Solicitud sencilla" button
+    # Step 1: Click "Easy Apply" / "Solicitud sencilla" button (may be <button> or <a>)
     easy_apply_clicked = False
     for sel in [
         'button.jobs-apply-button',
@@ -120,6 +120,10 @@ async def _linkedin_easy_apply(
         'button[aria-label*="Easy Apply"]',
         'button[aria-label*="Solicitud sencilla"]',
         '.jobs-apply-button--top-card button',
+        'a:has-text("Easy Apply")',
+        'a:has-text("Solicitud sencilla")',
+        'a[aria-label*="Easy Apply"]',
+        'a[aria-label*="Solicitud sencilla"]',
     ]:
         try:
             btn = page.locator(sel).first
@@ -140,7 +144,7 @@ async def _linkedin_easy_apply(
         return {"success": False, "status": "error", "message": "Could not find Easy Apply button"}
 
     # Step 2: Navigate through modal steps
-    max_modal_steps = 10
+    max_modal_steps = 15
     cv_uploaded = False
 
     for modal_step in range(max_modal_steps):
@@ -403,12 +407,72 @@ async def _linkedin_fill_modal_fields(
             if any(w in group_lower for w in ["authorized", "autorizado", "legally"]):
                 if "yes" in label.lower() or "sí" in label.lower():
                     await radio.check()
-            # Sponsorship questions - answer No
+            # Sponsorship questions - answer Yes (Mexico-based, needs visa for US/EU)
             elif any(w in group_lower for w in ["sponsor", "visa"]):
-                if "no" in label.lower():
+                if "yes" in label.lower() and "future" not in label.lower():
                     await radio.check()
         except Exception:
             continue
+
+    # Handle LinkedIn custom fieldsets with label-based options (not standard radio/checkbox)
+    # LinkedIn may use custom components where clicking the <label> triggers the selection
+    try:
+        answered = await page.evaluate("""() => {
+            const modal = document.querySelector('[role="dialog"]') || document.body;
+            const fieldsets = modal.querySelectorAll('fieldset');
+            let answered = false;
+            for (const fs of fieldsets) {
+                const legend = (fs.querySelector('legend')?.innerText || '').toLowerCase();
+                const labels = fs.querySelectorAll('label');
+                // Skip if already has a checked input
+                if (fs.querySelector('input:checked')) continue;
+                if (labels.length === 0) continue;
+
+                let targetText = null;
+                if (legend.includes('visa') || legend.includes('sponsor')) {
+                    targetText = 'yes';
+                } else if (legend.includes('authorized') || legend.includes('right to work') || legend.includes('legally')) {
+                    targetText = 'yes';
+                } else if (legend.includes('commute') || legend.includes('relocate')) {
+                    targetText = 'yes';
+                }
+
+                if (targetText) {
+                    for (const lbl of labels) {
+                        if (lbl.innerText.trim().toLowerCase() === targetText) {
+                            lbl.click();
+                            answered = true;
+                            break;
+                        }
+                    }
+                } else {
+                    // Generic: click first label option
+                    labels[0].click();
+                    answered = true;
+                }
+            }
+            return answered;
+        }""")
+        if answered:
+            logger.debug("LinkedIn auto-fill: answered fieldset questions via label click")
+    except Exception:
+        pass
+
+    # Also handle error-indicated required fields by clicking "Yes" label
+    try:
+        error_visible = await page.locator(
+            '[role="dialog"] :text("Please make a selection"), '
+            '[role="dialog"] :text("Selecciona")'
+        ).first.is_visible(timeout=500)
+        if error_visible:
+            for text in ["Yes", "Sí", "No"]:
+                label = page.locator(f'[role="dialog"] fieldset label:has-text("{text}")').first
+                if await label.is_visible(timeout=500):
+                    await label.click()
+                    logger.debug(f"LinkedIn auto-fill: clicked label '{text}' for required field")
+                    break
+    except Exception:
+        pass
 
 
 async def _linkedin_fill_with_llm(
@@ -787,7 +851,7 @@ async def apply_to_job_url(
         page: Page = await context.new_page()
 
         try:
-            await page.goto(job_url, wait_until="networkidle", timeout=30000)
+            await page.goto(job_url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2000)
 
             history = []

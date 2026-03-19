@@ -144,7 +144,7 @@ def _already_contacted(log: dict, profile_url: str) -> bool:
 def search_hr_contacts(company: str, limit: int = 5) -> list:
     """Search LinkedIn for HR/Recruiter contacts at a company.
     Uses Playwright to search people with recruiter/HR keywords at the company.
-    Returns list of: {name, title, profile_url, company}"""
+    Returns list of: {name, title, profile_url, vanity_name, company}"""
     pw = None
     browser = None
     contacts = []
@@ -159,44 +159,46 @@ def search_hr_contacts(company: str, limit: int = 5) -> list:
 
         logger.info(f"[hr_agent] Searching HR contacts at {company}...")
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
+        time.sleep(4)
 
-        # Extract profile cards from search results
-        # LinkedIn search result cards have class like entity-result__item
-        result_cards = page.locator(".entity-result__item, .search-results-container li")
-        count = result_cards.count()
-        logger.info(f"[hr_agent] Found {count} search result cards for {company}")
+        # LinkedIn 2025/2026: uses obfuscated CSS classes. Results live inside
+        # div[role="list"] with <a href="/in/..."> links containing name + title.
+        profile_links = page.locator('div[role="list"] a[href*="/in/"]')
+        count = profile_links.count()
+        logger.info(f"[hr_agent] Found {count} profile links for {company}")
 
-        for i in range(min(count, limit * 2)):  # fetch extra to filter
+        seen_urls: set = set()
+
+        for i in range(count):
             if len(contacts) >= limit:
                 break
             try:
-                card = result_cards.nth(i)
+                link = profile_links.nth(i)
+                href = link.get_attribute("href", timeout=2000) or ""
 
-                # Name
-                name_elem = card.locator(
-                    ".entity-result__title-text a span[aria-hidden='true'], "
-                    ".app-aware-link span[aria-hidden='true']"
-                ).first
-                name = name_elem.inner_text(timeout=2000).strip() if name_elem.is_visible(timeout=1000) else ""
-
-                # Title
-                title_elem = card.locator(
-                    ".entity-result__primary-subtitle, .entity-result__secondary-subtitle"
-                ).first
-                title = title_elem.inner_text(timeout=2000).strip() if title_elem.is_visible(timeout=1000) else ""
-
-                # Profile URL
-                link_elem = card.locator("a.app-aware-link").first
-                href = link_elem.get_attribute("href", timeout=2000) if link_elem.is_visible(timeout=1000) else ""
-
-                # Clean URL: keep only the /in/... part
-                profile_url = ""
-                if href and "/in/" in href:
-                    profile_url = "https://www.linkedin.com" + href.split("?")[0] if href.startswith("/") else href.split("?")[0]
-
-                if not name or not profile_url:
+                if "/in/" not in href:
                     continue
+
+                # Clean URL
+                profile_url = href.split("?")[0]
+                if not profile_url.startswith("http"):
+                    profile_url = "https://www.linkedin.com" + profile_url
+
+                if profile_url in seen_urls:
+                    continue
+
+                text = link.inner_text(timeout=2000).strip()
+                lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+                # The main result link has 3+ lines: name, degree, title, location
+                # Skip small name-only links (duplicates)
+                if len(lines) < 3:
+                    continue
+
+                seen_urls.add(profile_url)
+                name = lines[0]
+                # lines[1] is usually "• 2nd" or degree indicator
+                title = lines[2] if len(lines) > 2 else ""
 
                 # Filter by HR/recruiter keywords in title
                 title_lower = title.lower()
@@ -205,16 +207,22 @@ def search_hr_contacts(company: str, limit: int = 5) -> list:
                 if not any(kw in title_lower for kw in hr_keywords):
                     continue
 
+                # Extract vanity name from URL for direct invite
+                vanity = ""
+                if "/in/" in profile_url:
+                    vanity = profile_url.rstrip("/").split("/in/")[-1]
+
                 contacts.append({
                     "name": name,
                     "title": title,
                     "profile_url": profile_url,
+                    "vanity_name": vanity,
                     "company": company,
                 })
                 logger.debug(f"[hr_agent] Found contact: {name} | {title} @ {company}")
 
             except Exception as card_err:
-                logger.debug(f"[hr_agent] Error parsing card {i}: {card_err}")
+                logger.debug(f"[hr_agent] Error parsing link {i}: {card_err}")
                 continue
 
     except Exception as e:
@@ -238,8 +246,10 @@ def send_connection_request(
     candidate_name: str,
     candidate_title: str,
     company: str,
+    vanity_name: Optional[str] = None,
 ) -> bool:
-    """Navigate to profile, click Connect, add personalized note, send.
+    """Navigate to the direct invite URL and send a personalized connection request.
+    Uses /preload/custom-invite/?vanityName=... for reliable dialog access.
     Returns True if request was sent successfully."""
     pw = None
     browser = None
@@ -258,91 +268,78 @@ def send_connection_request(
     try:
         pw, browser, context, page = _build_playwright_context()
 
-        logger.info(f"[hr_agent] Navigating to profile: {profile_url}")
-        page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
+        # Extract vanity name from profile URL if not provided
+        if not vanity_name:
+            if "/in/" in profile_url:
+                vanity_name = profile_url.rstrip("/").split("/in/")[-1].split("?")[0]
 
-        # Look for Connect button (may be in actions area or "More" dropdown)
-        connect_selectors = [
-            'button[aria-label*="Connect"]',
-            'button[aria-label*="Conectar"]',
-            'button:has-text("Connect")',
-            'button:has-text("Conectar")',
-            '.pvs-profile-actions button:has-text("Connect")',
-            '.pvs-profile-actions button:has-text("Conectar")',
-        ]
-
-        clicked_connect = False
-        for selector in connect_selectors:
-            try:
-                btn = page.locator(selector).first
-                if btn.is_visible(timeout=2000) and btn.is_enabled(timeout=1000):
-                    btn.click()
-                    logger.info(f"[hr_agent] Clicked Connect via: {selector}")
-                    clicked_connect = True
-                    break
-            except Exception:
-                continue
-
-        if not clicked_connect:
-            # Try "More" button to expand actions
-            try:
-                more_btn = page.locator('button[aria-label="More actions"]').first
-                if more_btn.is_visible(timeout=2000):
-                    more_btn.click()
-                    time.sleep(1)
-                    # Now look for Connect in dropdown
-                    for selector in connect_selectors:
-                        try:
-                            btn = page.locator(selector).first
-                            if btn.is_visible(timeout=2000):
-                                btn.click()
-                                clicked_connect = True
-                                break
-                        except Exception:
-                            continue
-            except Exception:
-                pass
-
-        if not clicked_connect:
-            logger.warning(f"[hr_agent] Connect button not found for: {profile_url}")
+        if not vanity_name:
+            logger.error(f"[hr_agent] Cannot extract vanity name from: {profile_url}")
             return False
 
-        time.sleep(2)
+        # Navigate directly to the invite dialog URL
+        invite_url = f"https://www.linkedin.com/preload/custom-invite/?vanityName={vanity_name}"
+        logger.info(f"[hr_agent] Navigating to invite URL for {contact_name}: {invite_url}")
+        page.goto(invite_url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
 
-        # Look for "Add a note" option in the connection dialog
+        # Click "Add a note" / "Añadir una nota"
         add_note_selectors = [
-            'button[aria-label="Add a note"]',
-            'button[aria-label="Añadir una nota"]',
             'button:has-text("Add a note")',
             'button:has-text("Añadir una nota")',
+            'button[aria-label="Add a note"]',
+            'button[aria-label="Añadir una nota"]',
         ]
 
+        clicked_add_note = False
         for selector in add_note_selectors:
             try:
                 btn = page.locator(selector).first
-                if btn.is_visible(timeout=3000):
+                if btn.is_visible(timeout=3000) and btn.is_enabled(timeout=1000):
                     btn.click()
                     logger.info(f"[hr_agent] Clicked 'Add a note' via: {selector}")
-                    time.sleep(1)
+                    clicked_add_note = True
+                    time.sleep(2)
                     break
             except Exception:
                 continue
+
+        if not clicked_add_note:
+            # Maybe the dialog didn't appear (already connected or pending)
+            # Check if we see "Pending" or already connected indicators
+            page_text = page.inner_text("body", timeout=3000)
+            if "pending" in page_text.lower() or "pendiente" in page_text.lower():
+                logger.warning(f"[hr_agent] Connection already pending for {contact_name}")
+                return False
+            # Try sending without note as fallback
+            send_no_note_selectors = [
+                'button:has-text("Send without a note")',
+                'button:has-text("Enviar sin nota")',
+            ]
+            for selector in send_no_note_selectors:
+                try:
+                    btn = page.locator(selector).first
+                    if btn.is_visible(timeout=2000) and btn.is_enabled(timeout=1000):
+                        btn.click()
+                        logger.info(f"[hr_agent] Sent without note to {contact_name}")
+                        time.sleep(2)
+                        return True
+                except Exception:
+                    continue
+            logger.warning(f"[hr_agent] Invite dialog not found for: {contact_name}")
+            return False
 
         # Type the note in the textarea
         note_textareas = [
             'textarea[name="message"]',
-            'textarea#custom-message',
-            'textarea[placeholder*="note"]',
-            'textarea[placeholder*="nota"]',
-            'div[data-test-modal] textarea',
+            'textarea',
         ]
 
         note_typed = False
         for selector in note_textareas:
             try:
                 ta = page.locator(selector).first
-                if ta.is_visible(timeout=2000):
+                if ta.is_visible(timeout=3000):
                     ta.click()
                     ta.fill(note)
                     note_typed = True
@@ -352,19 +349,18 @@ def send_connection_request(
                 continue
 
         if not note_typed:
-            logger.warning("[hr_agent] Could not type note, sending without note")
+            logger.warning("[hr_agent] Could not type note, will try to send anyway")
 
         time.sleep(1)
 
         # Click Send / Enviar
         send_selectors = [
-            'button[aria-label="Send now"]',
-            'button[aria-label="Enviar ahora"]',
             'button:has-text("Send")',
             'button:has-text("Enviar")',
+            'button[aria-label="Send now"]',
+            'button[aria-label="Enviar ahora"]',
             'button[aria-label="Send invitation"]',
             'button[aria-label="Enviar invitación"]',
-            'div[data-test-modal] button.artdeco-button--primary',
         ]
 
         sent = False
@@ -383,7 +379,7 @@ def send_connection_request(
             time.sleep(2)
             logger.info(f"[hr_agent] Connection request sent to {contact_name} @ {company}")
         else:
-            logger.error(f"[hr_agent] Failed to send connection request to {contact_name}")
+            logger.error(f"[hr_agent] Failed to click Send for {contact_name}")
 
         return sent
 
@@ -473,6 +469,7 @@ def expand_hr_network(max_requests: int = 10) -> dict:
                 candidate_name=CANDIDATE_NAME,
                 candidate_title=CANDIDATE_TITLE,
                 company=company,
+                vanity_name=contact.get("vanity_name"),
             )
 
             entry = {

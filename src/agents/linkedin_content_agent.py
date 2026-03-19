@@ -234,6 +234,96 @@ def _extract_json(raw: str) -> Optional[dict]:
     return None
 
 
+def _regenerate_post_content(topic: str, previous_issues: str) -> dict:
+    """Regenerate post content incorporating feedback from validation failures.
+    Instructs the LLM to avoid the specific issues found in previous attempts."""
+    system_msg = SystemMessage(content="""Eres un experto en tecnología y ghostwriter para LinkedIn.
+Escribes posts en español para Alejandro Hernandez Loza, Senior Software Engineer con 12 años de experiencia
+en Java, Spring Boot, Microservicios, Cloud (GCP/AWS), Docker, Kubernetes e Inteligencia Artificial, basado en CDMX.
+
+Estilo de posts:
+- Profesionales, educativos y con perspectiva de industria
+- Descripciones claras y accesibles, SIN código fuente ni snippets
+- En primera persona algunas veces: "Hoy aprendí...", "¿Sabías que...", "En mi experiencia..."
+- Máximo 1300 caracteres (límite de LinkedIn)
+- Incluye 3-5 hashtags relevantes al final
+- Audiencia: developers, tech leads y CTOs de México y LATAM
+- Tono: profesional, con autoridad técnica, pero accesible
+
+IMPORTANTE: NO incluyas código fuente, snippets, ni bloques de código.
+Los posts deben ser descripciones profesionales con conceptos, beneficios y casos de uso.
+
+REGLA CRÍTICA: NO inventes estadísticas, porcentajes ni métricas que no puedas respaldar
+con fuentes oficiales. Si mencionas un dato numérico, debe ser de documentación oficial
+o ampliamente conocido en la industria. Prefiere descripciones cualitativas sobre cuantitativas
+a menos que el dato sea verificable.
+
+Formato de respuesta (JSON):
+{
+  "text": "texto completo del post con hashtags al final",
+  "hashtags": ["#Java", "#SpringBoot", ...],
+  "infographic_data": {
+    "type": "tips|comparison|flow",
+    "title": "título de la infografía",
+    "subtitle": "subtítulo",
+    // Si type=tips:
+    "tips": [{"icon": "⚡", "title": "Concepto clave", "description": "Explicación profesional con datos VERIFICABLES"}],
+    // Si type=comparison:
+    "left_label": "Opción A",
+    "right_label": "Opción B",
+    "comparisons": [{"aspect": "Criterio", "left": "valor", "right": "valor"}],
+    // Si type=flow:
+    "steps": [{"step": "1", "title": "Paso", "description": "Qué sucede en este paso"}]
+  }
+}
+
+REGLAS PARA LA INFOGRAFÍA:
+- TODOS los datos deben ser 100% verificables (versiones, nombres de APIs, métricas)
+- NO inventes números — usa solo datos de documentación oficial
+- NUNCA incluir código fuente — solo descripciones profesionales
+- Alterna entre los 3 tipos (tips, comparison, flow) para variedad
+- Tipo "flow" es ideal para explicar arquitecturas, pipelines y procesos""")
+
+    human_msg = HumanMessage(content=f"""Crea un post de LinkedIn sobre: {topic}
+
+ATENCIÓN: Un intento anterior fue rechazado por el validador técnico con estos problemas:
+{previous_issues}
+
+Por favor corrige esos errores. NO inventes estadísticas ni porcentajes.
+Usa solo hechos verificables y ampliamente conocidos.""")
+
+    try:
+        raw = coordinator.invoke(
+            "content_generation",
+            [system_msg, human_msg],
+            temperature=0.7,
+            max_tokens=1024,
+        )
+
+        result = _extract_json(raw)
+        if result and "text" in result:
+            if len(result.get("text", "")) > 1300:
+                result["text"] = result["text"][:1297] + "..."
+            logger.info(f"[content_agent] Regenerated post content for topic: {topic}")
+            return result
+
+        # Fallback
+        text = raw.strip()
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:])
+        if text.endswith("```"):
+            text = text[:-3].strip()
+        text = text[:1300]
+        return {
+            "text": text,
+            "image_prompt": f"abstract geometric illustration representing {topic}, no text, no letters, dark gradient background, blue and cyan glowing shapes, minimalist tech style",
+            "hashtags": ["#Java", "#SpringBoot", "#SoftwareEngineering"],
+        }
+    except Exception as e:
+        logger.error(f"[content_agent] Error regenerating post content: {e}")
+        raise
+
+
 def generate_image(image_prompt: str) -> Optional[str]:
     """Generate image using CogView-3-Plus, save to /tmp/, return file path.
     Returns None if generation fails."""
@@ -349,35 +439,56 @@ Marca valid: false si hay CUALQUIER error factual. Sé estricto.""")
         return False, f"Error en validación: {e}"  # Si falla la validación, NO publicar
 
 
-def create_and_publish_post() -> bool:
+def create_and_publish_post(max_retries: int = 3) -> bool:
     """Full pipeline: genera contenido + infografía → valida info → guarda para revisión.
-    NUNCA publica directamente. Todo queda pendiente de aprobación de Alejandro."""
+    NUNCA publica directamente. Todo queda pendiente de aprobación de Alejandro.
+    Retries up to max_retries times if validation fails (with feedback to LLM)."""
     log = _load_log()
 
     # 1. Select topic
     topic = select_next_topic()
 
-    # 2. Generate text content
-    try:
-        content = generate_post_content(topic)
-    except Exception as e:
-        logger.error(f"[content_agent] Content generation failed: {e}")
-        return False
+    # 2. Generate + validate with retries
+    content = None
+    post_text = ""
+    hashtags = []
+    infographic_data = {}
+    is_valid = False
+    validation_notes = ""
+    previous_issues = ""
 
-    post_text = content.get("text", "")
-    hashtags = content.get("hashtags", [])
-    infographic_data = content.get("infographic_data", {})
+    for attempt in range(1, max_retries + 1):
+        logger.info(f"[content_agent] Generation attempt {attempt}/{max_retries} for '{topic}'")
 
-    if not post_text:
-        logger.error("[content_agent] Empty post text generated")
-        return False
+        try:
+            if attempt == 1:
+                content = generate_post_content(topic)
+            else:
+                content = _regenerate_post_content(topic, previous_issues)
+        except Exception as e:
+            logger.error(f"[content_agent] Content generation failed (attempt {attempt}): {e}")
+            continue
 
-    # 3. Validate content — verificar que la info técnica sea correcta
-    is_valid, validation_notes = validate_content_with_details(post_text, topic)
+        post_text = content.get("text", "")
+        hashtags = content.get("hashtags", [])
+        infographic_data = content.get("infographic_data", {})
+
+        if not post_text:
+            logger.error("[content_agent] Empty post text generated")
+            continue
+
+        # Validate
+        is_valid, validation_notes = validate_content_with_details(post_text, topic)
+        if is_valid:
+            logger.info(f"[content_agent] Validation PASSED for '{topic}' on attempt {attempt}")
+            break
+        else:
+            logger.warning(f"[content_agent] Validation FAILED (attempt {attempt}) for '{topic}': {validation_notes}")
+            previous_issues = validation_notes
+
     if not is_valid:
-        logger.warning(f"[content_agent] Validation FAILED for '{topic}': {validation_notes}")
+        logger.error(f"[content_agent] All {max_retries} attempts failed validation for '{topic}'")
         return False
-    logger.info(f"[content_agent] Validation PASSED for '{topic}'")
 
     # 4. Generate infographic with VERIFIED data only
     image_path = None

@@ -1,6 +1,7 @@
 """
 Gmail tool: leer emails de respuestas de trabajo y enviar follow-ups.
 """
+
 import base64
 import email as email_lib
 from datetime import datetime
@@ -131,14 +132,19 @@ def _extract_body(payload: Dict) -> str:
             if part["mimeType"] == "text/plain":
                 data = part["body"].get("data", "")
                 if data:
-                    body = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                    body = base64.urlsafe_b64decode(data).decode(
+                        "utf-8", errors="replace"
+                    )
                     break
             elif part["mimeType"] == "text/html" and not body:
                 data = part["body"].get("data", "")
                 if data:
-                    html = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                    html = base64.urlsafe_b64decode(data).decode(
+                        "utf-8", errors="replace"
+                    )
                     # Extraer texto simple del HTML
                     import re
+
                     body = re.sub(r"<[^>]+>", " ", html)
                     body = re.sub(r"\s+", " ", body).strip()
     else:
@@ -154,9 +160,18 @@ def send_email(
     subject: str,
     body: str,
     thread_id: Optional[str] = None,
+    attachments: Optional[List[str]] = None,
 ) -> bool:
     """
     Envía un email. Si se provee thread_id, responde en el mismo hilo.
+    Puede adjuntar archivos.
+
+    Args:
+        to: Destinatario
+        subject: Asunto
+        body: Cuerpo del email
+        thread_id: ID del hilo para responder (opcional)
+        attachments: Lista de rutas de archivos a adjuntar (opcional)
 
     Returns:
         True si se envió correctamente
@@ -169,6 +184,22 @@ def send_email(
         message["From"] = settings.gmail_my_email
         message["Subject"] = subject
         message.set_content(body)
+
+        if attachments:
+            for file_path in attachments:
+                if os.path.exists(file_path):
+                    with open(file_path, "rb") as f:
+                        file_data = f.read()
+                    file_name = os.path.basename(file_path)
+                    message.add_attachment(
+                        file_data,
+                        maintype="application",
+                        subtype="octet-stream",
+                        filename=file_name,
+                    )
+                    logger.info(f"Adjunto agregado: {file_name}")
+                else:
+                    logger.warning(f"Archivo no encontrado: {file_path}")
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         msg_body = {"raw": raw}
