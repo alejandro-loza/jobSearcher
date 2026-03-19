@@ -208,9 +208,11 @@ async def linkedin_messages_task():
                 unique_convs.append(conv)
 
         new_activity = 0
+        replies_sent_this_run = 0
+        MAX_REPLIES_PER_RUN = 5  # anti-spam: máximo 5 respuestas por ciclo de 5 min
 
         # Contactos personales — el agente NO responde, solo notifica a Alejandro
-        PERSONAL_CONTACTS_NO_AUTO_REPLY = {"Sam Lewis"}
+        PERSONAL_CONTACTS_NO_AUTO_REPLY = {"Sam Lewis", "Melba Ruiz"}
 
         for conv in unique_convs:
             conv_id = conv["conversation_id"]
@@ -350,6 +352,18 @@ async def linkedin_messages_task():
                 logger.info(f"[escalado→WhatsApp] Entrevista {sender_name}")
                 continue
 
+            # === ANTI-SPAM: no enviar más de 2 mensajes seguidos sin respuesta ===
+            our_consecutive = 0
+            for msg in reversed(full_msgs):
+                if msg.get("from_me"):
+                    our_consecutive += 1
+                else:
+                    break
+            if our_consecutive >= 2:
+                logger.info(f"[anti-spam] {sender_name}: {our_consecutive} msgs nuestros sin respuesta, NO enviamos más")
+                tracker.mark_messages_processed(conv_id)
+                continue
+
             # === RESPUESTAS AUTÓNOMAS ===
 
             if intent == "rejection":
@@ -363,12 +377,17 @@ async def linkedin_messages_task():
             # info, general → responder automáticamente via Voyager API
             draft = analysis.get("draft_response", "")
             if draft:
+                if replies_sent_this_run >= MAX_REPLIES_PER_RUN:
+                    logger.info(f"[anti-spam] Límite de {MAX_REPLIES_PER_RUN} respuestas por ciclo alcanzado, {sender_name} pospuesto")
+                    continue
                 sent = await asyncio.to_thread(
                     linkedin_messages_tool.send_message, conv_id, draft, sender_name
                 )
                 if sent:
                     tracker.record_our_reply(conv_id, draft)
-                    logger.success(f"[auto-reply] {sender_name}: {draft[:60]}...")
+                    replies_sent_this_run += 1
+                    logger.success(f"[auto-reply] {sender_name}: {draft[:60]}... ({replies_sent_this_run}/{MAX_REPLIES_PER_RUN})")
+                    await asyncio.sleep(5)  # pausa anti-spam entre envíos
                 else:
                     logger.warning(f"[auto-reply] Falló envío a {sender_name}")
                     tracker.update_conversation_state(conv_id, "new", "send_failed")
