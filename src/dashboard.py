@@ -169,31 +169,131 @@ def generate_dashboard_html() -> str:
         </div>
 
         <div id="section-jobs" class="hidden">
-             <!-- Jobs Table Section -->
-             <div class="flex justify-between items-center mb-6">
-                <h2 class="text-xl font-bold">Jobs Sugeridos</h2>
-                <div class="flex border border-white/10 rounded-xl overflow-hidden glass">
-                    <button class="px-4 py-1.5 text-xs bg-primary-600 text-white">Todos</button>
-                    <button class="px-4 py-1.5 text-xs hover:bg-white/5 border-l border-white/10">High Score (>=75%)</button>
+             <!-- Jobs Section Header -->
+             <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
+                <div>
+                    <h2 class="text-xl font-bold flex items-center gap-2">
+                        <i data-lucide="briefcase" class="w-5 h-5 text-primary-500"></i>
+                        Vacantes Encontradas
+                    </h2>
+                    <p class="text-xs text-gray-500 mt-1">Actualización cada 3 horas · <span id="jobs-count">0</span> vacantes</p>
+                </div>
+                <div class="flex flex-wrap gap-3">
+                    <!-- Search -->
+                    <div class="relative">
+                        <i data-lucide="search" class="w-4 h-4 absolute left-3 top-2.5 text-gray-500"></i>
+                        <input type="text" id="jobs-search" placeholder="Buscar empresa o puesto..."
+                            class="bg-white/5 border border-white/10 rounded-xl py-2 pl-9 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/50 w-64"
+                            oninput="filterJobs()">
+                    </div>
                 </div>
              </div>
+
+             <!-- Jobs Filter Tabs -->
+             <div class="flex flex-wrap gap-2 mb-6">
+                <button onclick="setJobFilter('all')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-primary-600 text-white" data-filter="all">
+                    Todos
+                </button>
+                <button onclick="setJobFilter('found')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-filter="found">
+                    Nuevos
+                </button>
+                <button onclick="setJobFilter('applied')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-filter="applied">
+                    Aplicados
+                </button>
+                <button onclick="setJobFilter('pending_apply')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-filter="pending_apply">
+                    Pendientes
+                </button>
+                <button onclick="setJobFilter('rejected')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-filter="rejected">
+                    Rechazados
+                </button>
+                <span class="border-l border-white/10 mx-2"></span>
+                <button onclick="setJobScoreFilter(75)" class="job-score-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-min="75">
+                    Score >= 75%
+                </button>
+                <button onclick="setJobScoreFilter(85)" class="job-score-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-min="85">
+                    Premium >= 85%
+                </button>
+             </div>
+
+             <!-- Jobs Stats Row -->
+             <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+                <div class="glass p-4 rounded-2xl text-center">
+                    <div class="text-2xl font-bold text-white" id="jobs-stat-total">0</div>
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Total</div>
+                </div>
+                <div class="glass p-4 rounded-2xl text-center">
+                    <div class="text-2xl font-bold text-blue-400" id="jobs-stat-found">0</div>
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Nuevos</div>
+                </div>
+                <div class="glass p-4 rounded-2xl text-center">
+                    <div class="text-2xl font-bold text-green-400" id="jobs-stat-applied">0</div>
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Aplicados</div>
+                </div>
+                <div class="glass p-4 rounded-2xl text-center">
+                    <div class="text-2xl font-bold text-yellow-400" id="jobs-stat-pending">0</div>
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Pendientes</div>
+                </div>
+                <div class="glass p-4 rounded-2xl text-center">
+                    <div class="text-2xl font-bold text-primary-400" id="jobs-stat-high">0</div>
+                    <div class="text-[10px] text-gray-500 uppercase font-bold">Score >= 75%</div>
+                </div>
+             </div>
+
+             <!-- Jobs Table -->
              <div class="glass rounded-3xl overflow-hidden mb-10">
-                <div class="overflow-x-auto">
+                <div class="overflow-x-auto" style="max-height: 70vh;">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-white/5 border-b border-white/5 text-gray-500 uppercase text-[10px] tracking-wider font-bold">
+                        <thead class="bg-white/5 border-b border-white/5 text-gray-500 uppercase text-[10px] tracking-wider font-bold sticky top-0 z-10" style="background: rgba(11,15,26,0.95);">
                             <tr>
-                                <th class="px-6 py-4">Status</th>
-                                <th class="px-6 py-4">Job / Empresa</th>
-                                <th class="px-6 py-4">Match</th>
-                                <th class="px-6 py-4">Fuente</th>
-                                <th class="px-6 py-4">Fecha</th>
-                                <th class="px-6 py-4">Acción</th>
+                                <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('match_score')">Score</th>
+                                <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('title')">Job / Empresa</th>
+                                <th class="px-5 py-4">Ubicación</th>
+                                <th class="px-5 py-4">Salario</th>
+                                <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('status')">Status</th>
+                                <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('source')">Fuente</th>
+                                <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('found_at')">Fecha</th>
+                                <th class="px-5 py-4">Acción</th>
                             </tr>
                         </thead>
                         <tbody id="jobs-tbody" class="divide-y divide-white/5">
-                            <!-- Se llena dinamico -->
                         </tbody>
                     </table>
+                </div>
+                <!-- Pagination -->
+                <div class="flex justify-between items-center px-6 py-4 border-t border-white/5">
+                    <span class="text-xs text-gray-500">Mostrando <span id="jobs-showing">0</span> de <span id="jobs-total-filtered">0</span></span>
+                    <div class="flex gap-2">
+                        <button onclick="jobsPage(-1)" class="px-3 py-1 bg-white/5 rounded-lg text-xs hover:bg-white/10">Anterior</button>
+                        <span class="px-3 py-1 text-xs text-gray-400" id="jobs-page-info">1 / 1</span>
+                        <button onclick="jobsPage(1)" class="px-3 py-1 bg-white/5 rounded-lg text-xs hover:bg-white/10">Siguiente</button>
+                    </div>
+                </div>
+             </div>
+
+             <!-- Job Detail Modal -->
+             <div id="job-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200] hidden flex items-center justify-center p-4" onclick="if(event.target===this)closeJobModal()">
+                <div class="glass rounded-3xl max-w-2xl w-full max-h-[80vh] overflow-y-auto p-8">
+                    <div class="flex justify-between items-start mb-4">
+                        <div>
+                            <h3 class="text-xl font-bold text-white" id="modal-title"></h3>
+                            <p class="text-sm text-gray-400" id="modal-company"></p>
+                        </div>
+                        <button onclick="closeJobModal()" class="text-gray-400 hover:text-white p-1">
+                            <i data-lucide="x" class="w-5 h-5"></i>
+                        </button>
+                    </div>
+                    <div class="flex flex-wrap gap-3 mb-4">
+                        <span class="px-3 py-1 rounded-lg text-xs font-bold" id="modal-score-badge"></span>
+                        <span class="px-3 py-1 bg-white/5 rounded-lg text-xs text-gray-400" id="modal-location"></span>
+                        <span class="px-3 py-1 bg-white/5 rounded-lg text-xs text-gray-400" id="modal-salary"></span>
+                        <span class="px-3 py-1 bg-white/5 rounded-lg text-xs text-gray-400" id="modal-source"></span>
+                    </div>
+                    <div class="text-sm text-gray-300 leading-relaxed whitespace-pre-line max-h-[40vh] overflow-y-auto mb-6 scrollbar-hide" id="modal-description"></div>
+                    <div class="flex gap-3">
+                        <a id="modal-url" href="#" target="_blank" class="px-6 py-2.5 bg-primary-600 hover:bg-primary-500 text-white rounded-xl text-sm font-semibold flex items-center gap-2">
+                            <i data-lucide="external-link" class="w-4 h-4"></i> Ver Vacante
+                        </a>
+                    </div>
                 </div>
              </div>
         </div>
@@ -302,6 +402,161 @@ def generate_dashboard_html() -> str:
             }});
         }}
 
+        // -- JOBS STATE --
+        let allJobs = [];
+        let filteredJobs = [];
+        let currentJobFilter = 'all';
+        let currentMinScore = 0;
+        let currentJobSort = 'found_at';
+        let jobSortAsc = false;
+        let jobPageNum = 0;
+        const JOBS_PER_PAGE = 50;
+
+        function scoreColor(s) {{
+            if (s >= 85) return 'text-green-400 bg-green-500/10';
+            if (s >= 75) return 'text-primary-400 bg-primary-500/10';
+            if (s >= 50) return 'text-yellow-400 bg-yellow-500/10';
+            return 'text-gray-500 bg-white/5';
+        }}
+
+        function statusBadge(st) {{
+            const m = {{
+                'found': 'bg-blue-500/10 text-blue-400',
+                'applied': 'bg-green-500/10 text-green-400',
+                'pending_apply': 'bg-yellow-500/10 text-yellow-400',
+                'rejected': 'bg-red-500/10 text-red-400',
+                'interview_scheduled': 'bg-purple-500/10 text-purple-400',
+            }};
+            return m[st] || 'bg-white/5 text-gray-400';
+        }}
+
+        function sourceBadge(src) {{
+            const m = {{
+                'linkedin': 'bg-blue-600/10 text-blue-400',
+                'indeed': 'bg-indigo-500/10 text-indigo-400',
+                'glassdoor': 'bg-green-600/10 text-green-400',
+            }};
+            return m[src] || 'bg-white/5 text-gray-400';
+        }}
+
+        function setJobFilter(f) {{
+            currentJobFilter = f;
+            jobPageNum = 0;
+            document.querySelectorAll('.job-filter-btn').forEach(b => {{
+                const active = b.dataset.filter === f;
+                b.className = `job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all ${{active ? 'bg-primary-600 text-white' : 'bg-white/5 text-gray-400 hover:bg-white/10'}}`;
+            }});
+            filterJobs();
+        }}
+
+        function setJobScoreFilter(min) {{
+            currentMinScore = currentMinScore === min ? 0 : min;
+            jobPageNum = 0;
+            document.querySelectorAll('.job-score-btn').forEach(b => {{
+                const active = parseInt(b.dataset.min) === currentMinScore;
+                b.className = `job-score-btn px-4 py-2 rounded-xl text-xs font-bold transition-all ${{active ? 'bg-primary-600 text-white' : 'bg-white/5 text-gray-400 hover:bg-white/10'}}`;
+            }});
+            filterJobs();
+        }}
+
+        function sortJobs(field) {{
+            if (currentJobSort === field) jobSortAsc = !jobSortAsc;
+            else {{ currentJobSort = field; jobSortAsc = field === 'title'; }}
+            filterJobs();
+        }}
+
+        function filterJobs() {{
+            const q = (document.getElementById('jobs-search')?.value || '').toLowerCase();
+            filteredJobs = allJobs.filter(j => {{
+                if (currentJobFilter !== 'all' && j.status !== currentJobFilter) return false;
+                if (currentMinScore > 0 && (j.match_score || 0) < currentMinScore) return false;
+                if (q && !(j.title || '').toLowerCase().includes(q) && !(j.company || '').toLowerCase().includes(q) && !(j.location || '').toLowerCase().includes(q)) return false;
+                return true;
+            }});
+            filteredJobs.sort((a, b) => {{
+                let va = a[currentJobSort] ?? '', vb = b[currentJobSort] ?? '';
+                if (typeof va === 'number') return jobSortAsc ? va - vb : vb - va;
+                return jobSortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+            }});
+            renderJobsPage();
+        }}
+
+        function jobsPage(dir) {{
+            const maxP = Math.max(0, Math.ceil(filteredJobs.length / JOBS_PER_PAGE) - 1);
+            jobPageNum = Math.max(0, Math.min(maxP, jobPageNum + dir));
+            renderJobsPage();
+        }}
+
+        function renderJobsPage() {{
+            const start = jobPageNum * JOBS_PER_PAGE;
+            const page = filteredJobs.slice(start, start + JOBS_PER_PAGE);
+            const totalPages = Math.max(1, Math.ceil(filteredJobs.length / JOBS_PER_PAGE));
+
+            document.getElementById('jobs-count').innerText = allJobs.length;
+            document.getElementById('jobs-total-filtered').innerText = filteredJobs.length;
+            document.getElementById('jobs-showing').innerText = page.length;
+            document.getElementById('jobs-page-info').innerText = `${{jobPageNum + 1}} / ${{totalPages}}`;
+
+            // Stats
+            document.getElementById('jobs-stat-total').innerText = allJobs.length;
+            document.getElementById('jobs-stat-found').innerText = allJobs.filter(j => j.status === 'found').length;
+            document.getElementById('jobs-stat-applied').innerText = allJobs.filter(j => j.status === 'applied').length;
+            document.getElementById('jobs-stat-pending').innerText = allJobs.filter(j => j.status === 'pending_apply').length;
+            document.getElementById('jobs-stat-high').innerText = allJobs.filter(j => (j.match_score || 0) >= 75).length;
+
+            const tbody = document.getElementById('jobs-tbody');
+            tbody.innerHTML = page.map((j, i) => `
+                <tr class="hover:bg-white/[0.03] cursor-pointer" onclick="openJobModal(${{start + i}})">
+                    <td class="px-5 py-3.5">
+                        <div class="flex items-center gap-2">
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm ${{scoreColor(j.match_score || 0)}}">
+                                ${{j.match_score || 0}}
+                            </div>
+                        </div>
+                    </td>
+                    <td class="px-5 py-3.5">
+                        <div class="font-semibold text-white text-sm line-clamp-1 max-w-xs">${{j.title || 'N/A'}}</div>
+                        <div class="text-xs text-gray-500">${{j.company || 'N/A'}}</div>
+                    </td>
+                    <td class="px-5 py-3.5 text-xs text-gray-400 max-w-[120px] truncate">${{j.location && j.location !== 'nan' ? j.location : 'Remote'}}</td>
+                    <td class="px-5 py-3.5 text-xs text-gray-400">${{j.salary || '---'}}</td>
+                    <td class="px-5 py-3.5">
+                        <span class="text-[10px] px-2.5 py-1 rounded-lg font-bold uppercase ${{statusBadge(j.status)}}">${{j.status}}</span>
+                    </td>
+                    <td class="px-5 py-3.5">
+                        <span class="text-[10px] px-2.5 py-1 rounded-lg font-bold uppercase ${{sourceBadge(j.source)}}">${{j.source}}</span>
+                    </td>
+                    <td class="px-5 py-3.5 text-xs text-gray-500">${{(j.found_at || '').substring(5, 16).replace('T', ' ')}}</td>
+                    <td class="px-5 py-3.5">
+                        <a href="${{j.url}}" target="_blank" onclick="event.stopPropagation()" class="p-1.5 px-3 bg-white/5 rounded-lg text-[10px] hover:bg-white/10 transition-all inline-flex items-center gap-1">
+                            <i data-lucide="external-link" class="w-3 h-3"></i> Link
+                        </a>
+                    </td>
+                </tr>
+            `).join('') || '<tr><td colspan="8" class="text-center py-10 text-gray-500 italic">No se encontraron vacantes con estos filtros</td></tr>';
+            lucide.createIcons();
+        }}
+
+        function openJobModal(idx) {{
+            const j = filteredJobs[idx];
+            if (!j) return;
+            document.getElementById('modal-title').innerText = j.title || 'N/A';
+            document.getElementById('modal-company').innerText = (j.company || '') + (j.location && j.location !== 'nan' ? ' · ' + j.location : ' · Remote');
+            const sb = document.getElementById('modal-score-badge');
+            sb.innerText = (j.match_score || 0) + '% match';
+            sb.className = `px-3 py-1 rounded-lg text-xs font-bold ${{scoreColor(j.match_score || 0)}}`;
+            document.getElementById('modal-location').innerText = j.location && j.location !== 'nan' ? j.location : 'Remote';
+            document.getElementById('modal-salary').innerText = j.salary || 'Salario no especificado';
+            document.getElementById('modal-source').innerText = (j.source || '').toUpperCase();
+            document.getElementById('modal-description').innerText = (j.description || 'Sin descripción disponible').substring(0, 3000);
+            document.getElementById('modal-url').href = j.url || '#';
+            document.getElementById('job-modal').classList.remove('hidden');
+        }}
+
+        function closeJobModal() {{
+            document.getElementById('job-modal').classList.add('hidden');
+        }}
+
         // -- DATA LOADING --
         async function refreshData() {{
             try {{
@@ -312,32 +567,9 @@ def generate_dashboard_html() -> str:
                 document.getElementById('stat-interviews').innerText = stats.interviews_scheduled;
                 document.getElementById('stat-rejected').innerText = stats.rejected;
 
-                // Jobs
-                const jobs = await fetch('/api/jobs').then(r => r.json());
-                const jobsTbody = document.getElementById('jobs-tbody');
-                jobsTbody.innerHTML = jobs.map(j => `
-                    <tr class="hover:bg-white/[0.02]">
-                        <td class="px-6 py-4">
-                            <span class="text-[10px] px-2 py-1 rounded bg-blue-500/10 text-blue-400 font-bold uppercase">${{j.status}}</span>
-                        </td>
-                        <td class="px-6 py-4">
-                            <div class="font-bold text-white text-sm line-clamp-1">${{j.title}}</div>
-                            <div class="text-xs text-gray-500">${{j.company}}</div>
-                        </td>
-                        <td class="px-6 py-4">
-                            <div class="font-bold text-sm ${{j.match_score >= 80 ? 'text-green-500' : 'text-primary-400'}}">${{j.match_score}}%</div>
-                        </td>
-                        <td class="px-6 py-4 text-xs font-medium text-gray-500 uppercase">
-                            ${{j.source}}
-                        </td>
-                        <td class="px-6 py-4 text-xs text-gray-500">
-                            ${{j.found_at.substring(5,16).replace('T', ' ')}}
-                        </td>
-                        <td class="px-6 py-4">
-                            <a href="${{j.url}}" target="_blank" class="p-1 px-3 bg-white/5 rounded-lg text-[10px] hover:bg-white/10 transition-all">Ver URL</a>
-                        </td>
-                    </tr>
-                `).join('');
+                // Jobs — load all
+                allJobs = await fetch('/api/jobs?status=all&limit=2000').then(r => r.json());
+                filterJobs();
 
                 // Apps
                 const apps = await fetch('/api/applications').then(r => r.json());
@@ -478,8 +710,10 @@ def generate_dashboard_html() -> str:
         window.addEventListener('load', () => {{
             lucide.createIcons();
             refreshData();
-            // Polling
-            setInterval(refreshData, 20000);
+            setInterval(refreshData, 30000);
+        }});
+        document.addEventListener('keydown', e => {{
+            if (e.key === 'Escape') closeJobModal();
         }});
     </script>
 </body>

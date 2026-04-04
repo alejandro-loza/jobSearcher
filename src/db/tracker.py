@@ -112,13 +112,16 @@ class JobTracker:
     def _migrate(self, conn):
         """Agrega columnas nuevas sin romper datos existentes."""
         migrations = [
-            ("applications", "pipeline_stage", "TEXT DEFAULT 'applied'"),
-            ("applications", "verified",       "INTEGER DEFAULT 0"),
-            ("applications", "notes",          "TEXT DEFAULT ''"),
-            ("applications", "last_activity",  "TEXT"),
-            ("applications", "response_date",  "TEXT"),
-            ("applications", "rejection_reason","TEXT DEFAULT ''"),
-            ("jobs",         "applied_url",    "TEXT DEFAULT ''"),
+            ("applications",        "pipeline_stage",  "TEXT DEFAULT 'applied'"),
+            ("applications",        "verified",        "INTEGER DEFAULT 0"),
+            ("applications",        "notes",           "TEXT DEFAULT ''"),
+            ("applications",        "last_activity",   "TEXT"),
+            ("applications",        "response_date",   "TEXT"),
+            ("applications",        "rejection_reason","TEXT DEFAULT ''"),
+            ("jobs",                "applied_url",     "TEXT DEFAULT ''"),
+            # Quién respondió: 'pending' | 'auto' | 'alejandro' | 'skipped'
+            ("emails",              "responded_by",    "TEXT DEFAULT 'pending'"),
+            ("linkedin_messages",   "responded_by",    "TEXT DEFAULT 'pending'"),
         ]
         existing = {}
         for table, col, _ in migrations:
@@ -176,7 +179,7 @@ class JobTracker:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_all_jobs(self, limit: int = 50) -> List[Dict]:
+    def get_all_jobs(self, limit: int = 2000) -> List[Dict]:
         with self._get_conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM jobs ORDER BY found_at DESC LIMIT ?", (limit,)
@@ -250,6 +253,32 @@ class JobTracker:
             )
             return cursor.lastrowid
 
+    def get_email_thread_history(self, gmail_thread_id: str) -> List[Dict]:
+        """
+        Retorna el hilo completo de un thread de Gmail: mensajes recibidos (emails)
+        + mensajes enviados (sent_emails), ordenados cronológicamente.
+        Cada dict tiene: body, from_me, subject, sent_at/received_at, from_address.
+        """
+        with self._get_conn() as conn:
+            received = conn.execute(
+                """SELECT content as body, 0 as from_me, subject,
+                          received_at as ts, from_address
+                   FROM emails WHERE gmail_thread_id = ?
+                   ORDER BY received_at ASC""",
+                (gmail_thread_id,),
+            ).fetchall()
+            sent = conn.execute(
+                """SELECT body, 1 as from_me, subject,
+                          sent_at as ts, 'alejandrohloza@gmail.com' as from_address
+                   FROM sent_emails WHERE thread_id = ?
+                   ORDER BY sent_at ASC""",
+                (gmail_thread_id,),
+            ).fetchall()
+
+        all_msgs = [dict(r) for r in received] + [dict(r) for r in sent]
+        all_msgs.sort(key=lambda x: x.get("ts") or "")
+        return all_msgs
+
     def mark_followup_sent(self, email_id: int):
         with self._get_conn() as conn:
             conn.execute(
@@ -263,6 +292,18 @@ class JobTracker:
                 "SELECT gmail_message_id FROM emails WHERE gmail_message_id IS NOT NULL"
             ).fetchall()
             return {r["gmail_message_id"] for r in rows}
+
+    def has_replied_to_thread(self, gmail_thread_id: str) -> bool:
+        """Verifica si ya enviamos una respuesta en este thread de Gmail."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM emails
+                   WHERE gmail_thread_id = ?
+                   AND (followup_sent_at IS NOT NULL OR action_taken = 'send_followup')
+                   LIMIT 1""",
+                (gmail_thread_id,),
+            ).fetchone()
+            return row is not None
 
     # --- INTERVIEWS ---
 
@@ -524,6 +565,35 @@ class JobTracker:
                 (conversation_id,),
             ).fetchone()
             return bool(row)
+
+    def set_email_responded_by(self, email_id: int, responded_by: str) -> None:
+        """Marca quién respondió este email. Valores: auto|alejandro|pending|skipped"""
+        assert responded_by in ("auto", "alejandro", "pending", "skipped")
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE emails SET responded_by=? WHERE id=?",
+                (responded_by, email_id),
+            )
+
+    def set_linkedin_message_responded_by(self, message_id: int, responded_by: str) -> None:
+        """Marca quién respondió este mensaje LinkedIn. Valores: auto|alejandro|pending|skipped"""
+        assert responded_by in ("auto", "alejandro", "pending", "skipped")
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE linkedin_messages SET responded_by=? WHERE id=?",
+                (responded_by, message_id),
+            )
+
+    def get_last_incoming_linkedin_message_id(self, conversation_id: str) -> Optional[int]:
+        """Retorna el ID del último mensaje entrante (from_me=0) en una conversación."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT id FROM linkedin_messages
+                   WHERE conversation_id=? AND from_me=0
+                   ORDER BY linkedin_timestamp DESC LIMIT 1""",
+                (conversation_id,),
+            ).fetchone()
+            return row["id"] if row else None
 
     def record_our_reply(self, conversation_id: str, text: str):
         """Registra un mensaje enviado por nosotros."""

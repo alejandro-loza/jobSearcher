@@ -867,9 +867,16 @@ async def apply_to_job_url(
             cv_pdf_path = "data/cv_alejandro_es.pdf" if _is_spanish_page else "data/cv_alejandro_en.pdf"
             logger.info(f"CV seleccionado: {cv_pdf_path} (español={_is_spanish_page})")
 
+            # Validar que el CV esté aprobado (debe contener Thomson Reuters)
+            from src.agents.antispam_agent import check_attachments, Decision as _Decision
+            cv_check = check_attachments([cv_pdf_path])
+            if cv_check.decision != _Decision.SEND:
+                logger.error(f"[antispam] CV no aprobado bloqueado en LinkedIn apply: {cv_check.reason}")
+                return {"success": False, "status": "blocked_cv", "message": cv_check.reason}
+
             # Resolver ruta absoluta del CV
             from pathlib import Path as _Path
-            abs_cv = (_Path("/data/projects/proyects/jobSearcher") / cv_pdf_path).resolve()
+            abs_cv = _Path(cv_pdf_path).resolve() if cv_pdf_path.startswith("/") else (_Path("/data/projects/proyects/jobSearcher") / cv_pdf_path).resolve()
             cv_uploaded = False
 
             # LinkedIn Easy Apply: use dedicated handler

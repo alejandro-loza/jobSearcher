@@ -210,14 +210,9 @@ def send_message(
     message: str,
 ) -> bool:
     """Send a message in an existing LinkedIn conversation."""
-    api = _get_api()
-    try:
-        api.send_message(message, conversation_urn_id=conversation_id)
-        logger.info(f"[linkedin_mcp] Message sent to conversation {conversation_id}")
-        return True
-    except Exception as e:
-        logger.error(f"[linkedin_mcp] Send message failed: {e}")
-        return False
+    # KILL SWITCH — all outgoing messages blocked
+    logger.warning(f"[linkedin_mcp] BLOCKED — send_message disabled (kill switch)")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -248,11 +243,9 @@ def create_post(
     image_path: Optional[str] = None,
 ) -> bool:
     """Publish a post to LinkedIn. Optionally attach an image (absolute path to PNG/JPG)."""
-    sys.path.insert(0, PROJECT_ROOT)
-    from src.tools.linkedin_post_tool import post_to_linkedin
-
-    result = post_to_linkedin(text=text, image_path=image_path)
-    return result
+    # KILL SWITCH — all outgoing posts blocked via MCP
+    logger.warning(f"[linkedin_mcp] BLOCKED — create_post disabled (kill switch)")
+    return False
 
 
 # ---------------------------------------------------------------------------

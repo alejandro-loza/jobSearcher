@@ -16,12 +16,18 @@ import os
 import pickle
 
 from config import settings
+from src.agents.antispam_agent import check_outgoing_email, record_sent, Decision
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
 ]
+
+# ── GLOBAL KILL SWITCH ────────────────────────────────────────────────────────
+# When True, send_email() will ALWAYS return False without sending anything.
+# This is the last line of defense — no email leaves the system.
+EMAIL_SENDING_BLOCKED = True
 
 
 def _get_gmail_service():
@@ -161,10 +167,12 @@ def send_email(
     body: str,
     thread_id: Optional[str] = None,
     attachments: Optional[List[str]] = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    sender_name: str = "",
+    _bypass_decision_agent: bool = False,
 ) -> bool:
     """
-    Envía un email. Si se provee thread_id, responde en el mismo hilo.
-    Puede adjuntar archivos.
+    Envía un email. REQUIERE aprobación del response_decision_agent.
 
     Args:
         to: Destinatario
@@ -172,11 +180,44 @@ def send_email(
         body: Cuerpo del email
         thread_id: ID del hilo para responder (opcional)
         attachments: Lista de rutas de archivos a adjuntar (opcional)
+        conversation_history: OBLIGATORIO — historial del hilo [{body, from_me, ...}]
+        sender_name: Nombre del remitente original (para contexto del decision agent)
+        _bypass_decision_agent: Solo True cuando Alejandro aprueba manualmente via WhatsApp
 
     Returns:
         True si se envió correctamente
     """
     try:
+        # ── GLOBAL KILL SWITCH — nothing gets sent if True ────────────────────
+        if EMAIL_SENDING_BLOCKED:
+            logger.warning(f"[KILL SWITCH] Email a {to} BLOQUEADO — EMAIL_SENDING_BLOCKED=True")
+            return False
+
+        # ── RESPONSE DECISION AGENT — última palabra ─────────────────────────
+        if not _bypass_decision_agent:
+            from src.agents.response_decision_agent import approve_outgoing
+            approved, reason = approve_outgoing(
+                to=to,
+                subject=subject,
+                body=body,
+                conversation_history=conversation_history or [],
+                sender_name=sender_name,
+                source="email",
+            )
+            if not approved:
+                logger.warning(f"[decision_agent] Email a {to} RECHAZADO — {reason}")
+                return False
+
+        # ── Anti-spam check (gatekeeper) ──────────────────────────────────────
+        check = check_outgoing_email(to=to, subject=subject, body=body, thread_id=thread_id, attachments=attachments)
+        if check.decision == Decision.BLOCK:
+            logger.warning(f"[antispam] BLOQUEADO → {to} | {check.reason}")
+            return False
+        if check.decision == Decision.APPROVE:
+            logger.warning(f"[antispam] REQUIERE APROBACIÓN → {to} | {check.reason}")
+            return False
+        # ─────────────────────────────────────────────────────────────────────
+
         service = _get_gmail_service()
 
         message = email_lib.message.EmailMessage()
@@ -208,6 +249,7 @@ def send_email(
 
         service.users().messages().send(userId="me", body=msg_body).execute()
         logger.success(f"Email enviado a {to}: {subject}")
+        record_sent(to=to, subject=subject, thread_id=thread_id, body=body)
         return True
 
     except Exception as e:

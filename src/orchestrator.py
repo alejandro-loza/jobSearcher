@@ -19,6 +19,7 @@ from config import settings
 from src.db.tracker import JobTracker
 from src.agents import master_agent
 from src.agents import recruiter_agent
+from src.agents import response_decision_agent
 from src.agents.chat_agent import chat_agent
 from src.tools import jobspy_tool, gmail_tool, calendar_tool, whatsapp_tool
 from src.tools import linkedin_messages_tool, browser_tool
@@ -31,6 +32,19 @@ scheduler = AsyncIOScheduler()
 pending_confirmations: Dict[str, Dict] = {}   # job_id -> {job, score}
 pending_recruiter_replies: Dict[str, Dict] = {}  # conv_id -> {analysis, sender, message}
 pending_slot_selection: Dict[str, Dict] = {}     # conv_id -> {slots, analysis, sender}
+
+# --- SAFETY SWITCHES ---
+# Deshabilitar envío automático de emails para evitar spam.
+AUTO_EMAIL_DISABLED = True
+# Deshabilitar respuestas automáticas de LinkedIn.
+AUTO_LINKEDIN_REPLY_DISABLED = True
+
+# Contactos NUNCA tocar — el agente NUNCA envía mensajes ni emails a estas personas.
+BLOCKED_CONTACTS_NEVER_REPLY: set[str] = {
+    "Sam Lewis",        # ex-jefa de Alejandro — responder manualmente
+    "Melba Ruiz",       # Thomson Reuters — manejo personal de reingreso
+    "Melba Ruiz Moron", # variante de nombre
+}
 
 
 # --- TAREAS SCHEDULED ---
@@ -102,6 +116,24 @@ async def job_search_task():
         whatsapp_tool.send_message(f"Error en búsqueda automática: {e}")
 
 
+EMAIL_BLOCKLIST = {
+    "padma@ptechpartners.com",
+}
+EMAIL_BLOCKLIST_DOMAINS = {
+    "noreply", "no-reply", "notifications", "mailer", "bounce",
+    "donotreply", "do-not-reply", "updates@e.mission", "ccsend.com",
+}
+MAX_AUTO_REPLIES_PER_CYCLE = 3  # anti-spam: máximo 3 auto-replies por ciclo de 30min
+
+
+def _is_blocked_sender(from_address: str) -> bool:
+    """Verifica si el remitente está en blocklist o es un dominio de notificaciones."""
+    addr = from_address.lower()
+    if addr in EMAIL_BLOCKLIST:
+        return True
+    return any(blocked in addr for blocked in EMAIL_BLOCKLIST_DOMAINS)
+
+
 async def email_monitor_task():
     """Monitorea Gmail para respuestas de empresas."""
     logger.info("Revisando emails de trabajo...")
@@ -111,26 +143,76 @@ async def email_monitor_task():
         processed_ids = tracker.get_processed_message_ids()
         new_emails = gmail_tool.get_recent_job_emails(processed_ids)
 
+        auto_replies_sent = 0
+
         for email in new_emails:
-            analysis = await asyncio.to_thread(
-                master_agent.analyze_email_response,
-                email["content"],
-                email["subject"],
-                email["from_address"],
+            from_addr = email.get("from_address", "")
+            thread_id  = email.get("thread_id", "")
+            content    = email.get("content", "")
+            subject    = email.get("subject", "")
+
+            # ── Paso 1: Response Decision Agent (ÚLTIMA PALABRA) ─────────────
+            # Cargar hilo completo (recibidos + enviados) para contexto del agente
+            thread_history = tracker.get_email_thread_history(thread_id) if thread_id else []
+            last_msg_ours = bool(thread_history and thread_history[-1].get("from_me"))
+
+            decision_result = await asyncio.to_thread(
+                response_decision_agent.decide_and_log,
+                from_address=from_addr,
+                message_body=content,
+                subject_or_title=subject,
+                thread_id_or_conv_id=thread_id,
+                last_message_is_ours=last_msg_ours,
+                conversation_history=thread_history,
+                source="email",
             )
 
-            # Buscar job relacionado en DB
-            job_id = _find_job_for_email(analysis.get("company_name", ""))
+            # Siempre guardar en DB con el resultado de la decisión
+            analysis = await asyncio.to_thread(
+                master_agent.analyze_email_response,
+                content, subject, from_addr,
+            ) if decision_result.decision == response_decision_agent.ResponseDecision.AUTO_RESPOND else {
+                "sentiment": "neutral", "action": "none",
+                "company_name": "", "summary": decision_result.reason,
+            }
 
-            email_data = {
+            job_id = _find_job_for_email(analysis.get("company_name", ""))
+            email_db_id = tracker.save_email({
                 **email,
                 "job_id": job_id,
-                "sentiment": analysis["sentiment"],
-                "action_taken": analysis["action"],
-            }
-            email_db_id = tracker.save_email(email_data)
+                "sentiment": analysis.get("sentiment", "neutral"),
+                "action_taken": decision_result.decision.value,
+            })
             gmail_tool.mark_as_read(email["message_id"])
 
+            # ── Actuar según la decisión ──────────────────────────────────────
+            Decision = response_decision_agent.ResponseDecision
+
+            if decision_result.decision == Decision.SKIP:
+                tracker.set_email_responded_by(email_db_id, "skipped")
+                continue
+
+            elif decision_result.decision == Decision.ESCALATE:
+                tracker.set_email_responded_by(email_db_id, "pending")
+                msg = decision_result.escalation_msg or (
+                    f"📧 *Email de {from_addr}*\n"
+                    f"Asunto: {subject}\n"
+                    f"Motivo: {decision_result.reason}\n"
+                    f"Extracto: {content[:250]}"
+                )
+                whatsapp_tool.send_message(msg)
+                continue
+
+            elif decision_result.decision == Decision.ASK_USER:
+                tracker.set_email_responded_by(email_db_id, "pending")
+                whatsapp_tool.send_message(
+                    decision_result.user_question or (
+                        f"📧 *{from_addr}* — necesito tu input:\n{content[:400]}"
+                    )
+                )
+                continue
+
+            # ── AUTO_RESPOND ──────────────────────────────────────────────────
             action = analysis.get("action", "none")
 
             if action == "update_rejected":
@@ -143,34 +225,53 @@ async def email_monitor_task():
                         sentiment="negative",
                         summary=analysis["summary"],
                     )
+                tracker.set_email_responded_by(email_db_id, "skipped")
 
             elif action == "schedule_interview":
                 _handle_interview_scheduling(analysis, job_id, email_db_id, resume)
+                tracker.set_email_responded_by(email_db_id, "auto")
 
-            elif action == "send_followup" or analysis.get("reply_needed"):
-                reply = analysis.get("suggested_reply", "")
-                if reply and email.get("from_address"):
-                    sent = gmail_tool.send_email(
-                        to=email["from_address"],
-                        subject=f"Re: {email['subject']}",
-                        body=reply,
-                        thread_id=email["thread_id"],
-                    )
-                    if sent:
-                        tracker.mark_followup_sent(email_db_id)
+            elif action in ("send_followup", "none") and decision_result.draft_response:
+                reply = decision_result.draft_response or analysis.get("suggested_reply", "")
+
+                if auto_replies_sent >= MAX_AUTO_REPLIES_PER_CYCLE:
+                    logger.info(f"[email-antispam] Límite {MAX_AUTO_REPLIES_PER_CYCLE} replies/ciclo alcanzado")
+                    tracker.set_email_responded_by(email_db_id, "pending")
+                    break
+
+                if reply and from_addr:
+                    if AUTO_EMAIL_DISABLED:
+                        logger.info(f"[AUTO_EMAIL_DISABLED] No enviando a {from_addr}")
+                        whatsapp_tool.send_message(
+                            f"📧 *Borrador listo* para {from_addr}\n"
+                            f"Asunto: {subject}\n\n{reply[:300]}\n\n"
+                            f"Envío en pausa. ¿Apruebas? (si/no)"
+                        )
+                        tracker.set_email_responded_by(email_db_id, "pending")
+                    else:
+                        sent = gmail_tool.send_email(
+                            to=from_addr,
+                            subject=f"Re: {subject}",
+                            body=reply,
+                            thread_id=thread_id,
+                        )
+                        if sent:
+                            tracker.mark_followup_sent(email_db_id)
+                            tracker.set_email_responded_by(email_db_id, "auto")
+                            auto_replies_sent += 1
 
             else:
-                # Notificar email neutral/positivo
-                if analysis["sentiment"] in ("positive", "neutral") and job_id:
+                tracker.set_email_responded_by(email_db_id, "skipped")
+                if analysis.get("sentiment") in ("positive", "interview") and job_id:
                     job = tracker.get_job(job_id)
                     whatsapp_tool.send_email_alert(
                         job_title=job["title"] if job else "",
-                        company=analysis["company_name"],
+                        company=analysis.get("company_name", ""),
                         sentiment=analysis["sentiment"],
-                        summary=analysis["summary"],
+                        summary=analysis.get("summary", ""),
                     )
 
-        logger.success(f"Emails procesados: {len(new_emails)}")
+        logger.success(f"Emails procesados: {len(new_emails)}, auto-replies: {auto_replies_sent}")
 
     except Exception as e:
         logger.error(f"Error en email_monitor_task: {e}")
@@ -211,25 +312,12 @@ async def linkedin_messages_task():
         replies_sent_this_run = 0
         MAX_REPLIES_PER_RUN = 5  # anti-spam: máximo 5 respuestas por ciclo de 5 min
 
-        # Contactos personales — el agente NO responde, solo notifica a Alejandro
-        PERSONAL_CONTACTS_NO_AUTO_REPLY = {"Sam Lewis", "Melba Ruiz"}
-
         for conv in unique_convs:
-            conv_id = conv["conversation_id"]
+            conv_id     = conv["conversation_id"]
             sender_name = conv.get("sender_name", "Reclutador")
             sender_title = conv.get("sender_title", "")
 
-            # Excepción: contacto personal — NO responder automáticamente
-            if any(name.lower() in sender_name.lower() for name in PERSONAL_CONTACTS_NO_AUTO_REPLY):
-                logger.info(f"[excepción personal] {sender_name} — notificando a Alejandro sin auto-reply")
-                whatsapp_tool.send_message(
-                    f"💬 *Mensaje de {sender_name}* en LinkedIn\n"
-                    f"Este contacto está en tu lista personal — responde tú manualmente.\n"
-                    f"No respondí automáticamente."
-                )
-                continue
-
-            # 2. Guardar/actualizar conversación en DB
+            # 1. Guardar/actualizar conversación en DB
             tracker.save_linkedin_conversation({
                 "conversation_id": conv_id,
                 "participant_name": sender_name,
@@ -239,7 +327,7 @@ async def linkedin_messages_task():
                 "last_message_at": conv.get("last_activity", 0),
             })
 
-            # 3. Obtener mensajes completos y guardarlos en DB
+            # 2. Obtener mensajes completos y guardarlos en DB
             full_msgs = await asyncio.to_thread(
                 linkedin_messages_tool.get_full_conversation, conv_id, sender_name
             )
@@ -258,136 +346,144 @@ async def linkedin_messages_task():
                     latest_recruiter_msg = msg["body"]
 
             if new_msgs == 0:
-                continue  # sin mensajes nuevos en esta conversación
+                continue  # sin mensajes nuevos
 
-            # 4. Verificar si ya respondimos (dedup)
-            if tracker.conversation_has_our_reply(conv_id):
-                # Ya respondimos — verificar si hay mensajes nuevos del reclutador
-                history = tracker.get_conversation_history(conv_id)
-                last_msg = history[-1] if history else {}
-                if last_msg.get("from_me"):
-                    continue  # último mensaje es nuestro, esperar respuesta
-
-            # Saltar si ya hay una respuesta pendiente en WhatsApp
+            # Saltar si ya hay respuesta pendiente en WhatsApp
             if conv_id in pending_recruiter_replies or conv_id in pending_slot_selection:
                 continue
 
             if not latest_recruiter_msg or len(latest_recruiter_msg.strip()) < 5:
-                # Intentar con el preview del scrape
                 latest_recruiter_msg = conv.get("message", "")
                 if not latest_recruiter_msg or len(latest_recruiter_msg.strip()) < 5:
                     continue
 
-            new_activity += 1
-
-            # 5. Obtener historial de DB para contexto del LLM
+            # 3. Historial de DB para contexto
             db_history = tracker.get_conversation_history(conv_id)
             history_for_llm = [
                 {"body": m["message_text"], "from_me": bool(m["from_me"])}
                 for m in db_history
             ]
 
-            # 6. Obtener slots del calendario
-            free_slots = await asyncio.to_thread(
-                calendar_tool.get_free_slots, 7, 60
+            # 4. Determinar si el último mensaje es nuestro
+            last_msg = db_history[-1] if db_history else {}
+            last_msg_is_ours = bool(last_msg.get("from_me"))
+
+            # ── RESPONSE DECISION AGENT (ÚLTIMA PALABRA) ─────────────────────
+            decision_result = await asyncio.to_thread(
+                response_decision_agent.decide_and_log,
+                sender_name=sender_name,
+                message_body=latest_recruiter_msg,
+                subject_or_title=sender_title,
+                thread_id_or_conv_id=conv_id,
+                last_message_is_ours=last_msg_is_ours,
+                conversation_history=history_for_llm,
+                source="linkedin",
             )
 
-            # 7. Analizar con LLM
-            analysis = await asyncio.to_thread(
-                recruiter_agent.analyze_recruiter_message,
-                latest_recruiter_msg, sender_name, sender_title,
-                history_for_llm, free_slots,
-            )
+            Decision = response_decision_agent.ResponseDecision
+            new_activity += 1
 
-            intent = analysis.get("intent", "general")
-            needs_input = analysis.get("needs_user_input", False)
+            if decision_result.decision == Decision.SKIP:
+                last_incoming_id = tracker.get_last_incoming_linkedin_message_id(conv_id)
+                if last_incoming_id:
+                    tracker.set_linkedin_message_responded_by(last_incoming_id, "skipped")
+                tracker.mark_messages_processed(conv_id)
+                continue
 
-            logger.info(
-                f"LinkedIn [{conv_id[:8]}] {sender_name}: intent={intent}, "
-                f"needs_input={needs_input}"
-            )
+            elif decision_result.decision == Decision.ESCALATE:
+                last_incoming_id = tracker.get_last_incoming_linkedin_message_id(conv_id)
+                if last_incoming_id:
+                    tracker.set_linkedin_message_responded_by(last_incoming_id, "pending")
+                msg = decision_result.escalation_msg or (
+                    f"💬 *{sender_name}* (LinkedIn)\n"
+                    f"Motivo: {decision_result.reason}\n"
+                    f"Mensaje: {latest_recruiter_msg[:300]}"
+                )
+                whatsapp_tool.send_message(msg)
+                tracker.update_conversation_state(conv_id, "escalated", decision_result.reason[:80])
+                tracker.mark_messages_processed(conv_id)
+                continue
 
-            # === DECISIONES QUE REQUIEREN A ALEJANDRO → WhatsApp ===
-
-            if intent == "offer" or needs_input:
+            elif decision_result.decision == Decision.ASK_USER:
+                last_incoming_id = tracker.get_last_incoming_linkedin_message_id(conv_id)
+                if last_incoming_id:
+                    tracker.set_linkedin_message_responded_by(last_incoming_id, "pending")
                 pending_recruiter_replies[conv_id] = {
-                    "analysis": analysis,
+                    "analysis": decision_result.llm_analysis,
                     "sender_name": sender_name,
                     "sender_title": sender_title,
                     "original_message": latest_recruiter_msg,
                 }
-                approval_msg = recruiter_agent.format_whatsapp_approval_request(
-                    sender_name=sender_name,
-                    sender_title=sender_title,
-                    original_message=latest_recruiter_msg,
-                    analysis=analysis,
-                    source="LinkedIn",
-                )
-                whatsapp_tool.send_message(approval_msg)
-                tracker.update_conversation_state(conv_id, "escalated", f"intent={intent}")
-                tracker.mark_messages_processed(conv_id)
-                logger.info(f"[escalado→WhatsApp] {sender_name}")
-                continue
-
-            if intent == "schedule" and free_slots:
-                pending_slot_selection[conv_id] = {
-                    "slots": free_slots,
-                    "analysis": analysis,
-                    "sender_name": sender_name,
-                    "sender_title": sender_title,
-                    "original_message": latest_recruiter_msg,
-                }
-                slots_text = "\n".join(
-                    f"  *{i+1}.* {s['label']}"
-                    for i, s in enumerate(free_slots[:5])
-                )
                 whatsapp_tool.send_message(
-                    f"📅 *{sender_name}* quiere agendar entrevista:\n"
-                    f'"{latest_recruiter_msg[:200]}"\n\n'
-                    f"Slots disponibles:\n{slots_text}\n\n"
-                    f"¿Cuál prefieres? Responde *1*, *2* o *3*"
+                    decision_result.user_question or (
+                        f"💬 *{sender_name}* (LinkedIn) — necesito tu input:\n{latest_recruiter_msg[:400]}"
+                    )
                 )
-                tracker.update_conversation_state(conv_id, "escalated", "schedule")
-                tracker.mark_messages_processed(conv_id)
-                logger.info(f"[escalado→WhatsApp] Entrevista {sender_name}")
-                continue
-
-            # === ANTI-SPAM: no enviar más de 2 mensajes seguidos sin respuesta ===
-            our_consecutive = 0
-            for msg in reversed(full_msgs):
-                if msg.get("from_me"):
-                    our_consecutive += 1
-                else:
-                    break
-            if our_consecutive >= 2:
-                logger.info(f"[anti-spam] {sender_name}: {our_consecutive} msgs nuestros sin respuesta, NO enviamos más")
+                tracker.update_conversation_state(conv_id, "escalated", "ask_user")
                 tracker.mark_messages_processed(conv_id)
                 continue
 
-            # === RESPUESTAS AUTÓNOMAS ===
+            # ── AUTO_RESPOND — usar draft del agente o recruiter_agent ────────
+            draft = decision_result.draft_response or ""
 
-            if intent == "rejection":
-                whatsapp_tool.send_message(
-                    f"❌ *{sender_name}*: {analysis.get('summary', 'Posición cerrada')}"
+            # Para scheduling/ofertas complejas, usar recruiter_agent completo
+            if not draft:
+                free_slots = await asyncio.to_thread(calendar_tool.get_free_slots, 7, 60)
+                analysis = await asyncio.to_thread(
+                    recruiter_agent.analyze_recruiter_message,
+                    latest_recruiter_msg, sender_name, sender_title,
+                    history_for_llm, free_slots,
                 )
-                tracker.update_conversation_state(conv_id, "closed", "rejection")
-                tracker.mark_messages_processed(conv_id)
-                continue
+                intent = analysis.get("intent", "general")
 
-            # info, general → responder automáticamente via Voyager API
-            draft = analysis.get("draft_response", "")
+                if intent == "rejection":
+                    whatsapp_tool.send_message(
+                        f"❌ *{sender_name}*: {analysis.get('summary', 'Posición cerrada')}"
+                    )
+                    tracker.update_conversation_state(conv_id, "closed", "rejection")
+                    tracker.mark_messages_processed(conv_id)
+                    continue
+
+                if intent == "schedule" and free_slots:
+                    pending_slot_selection[conv_id] = {
+                        "slots": free_slots, "analysis": analysis,
+                        "sender_name": sender_name, "sender_title": sender_title,
+                        "original_message": latest_recruiter_msg,
+                    }
+                    slots_text = "\n".join(
+                        f"  *{i+1}.* {s['label']}" for i, s in enumerate(free_slots[:5])
+                    )
+                    whatsapp_tool.send_message(
+                        f"📅 *{sender_name}* quiere agendar entrevista:\n"
+                        f'"{latest_recruiter_msg[:200]}"\n\n'
+                        f"Slots disponibles:\n{slots_text}\n\n"
+                        f"¿Cuál prefieres? Responde *1*, *2* o *3*"
+                    )
+                    tracker.update_conversation_state(conv_id, "escalated", "schedule")
+                    tracker.mark_messages_processed(conv_id)
+                    continue
+
+                draft = analysis.get("draft_response", "")
+
             if draft:
+                if AUTO_LINKEDIN_REPLY_DISABLED:
+                    logger.info(f"[AUTO_LINKEDIN_DISABLED] Draft para {sender_name}: {draft[:60]}...")
+                    tracker.mark_messages_processed(conv_id)
+                    continue
                 if replies_sent_this_run >= MAX_REPLIES_PER_RUN:
-                    logger.info(f"[anti-spam] Límite de {MAX_REPLIES_PER_RUN} respuestas por ciclo alcanzado, {sender_name} pospuesto")
+                    logger.info(f"[anti-spam] Límite {MAX_REPLIES_PER_RUN}/ciclo, {sender_name} pospuesto")
                     continue
                 sent = await asyncio.to_thread(
                     linkedin_messages_tool.send_message, conv_id, draft, sender_name
                 )
                 if sent:
                     tracker.record_our_reply(conv_id, draft)
+                    last_incoming_id = tracker.get_last_incoming_linkedin_message_id(conv_id)
+                    if last_incoming_id:
+                        tracker.set_linkedin_message_responded_by(last_incoming_id, "auto")
                     replies_sent_this_run += 1
                     logger.success(f"[auto-reply] {sender_name}: {draft[:60]}... ({replies_sent_this_run}/{MAX_REPLIES_PER_RUN})")
-                    await asyncio.sleep(5)  # pausa anti-spam entre envíos
+                    await asyncio.sleep(5)
                 else:
                     logger.warning(f"[auto-reply] Falló envío a {sender_name}")
                     tracker.update_conversation_state(conv_id, "new", "send_failed")
@@ -581,18 +677,32 @@ async def followup_task():
     try:
         resume = _load_resume()
         pending = tracker.get_applications_pending_followup()
+        followups_sent = 0
+        MAX_FOLLOWUPS_PER_CYCLE = 2  # anti-spam: máximo 2 follow-ups por día
 
         for app in pending:
+            if followups_sent >= MAX_FOLLOWUPS_PER_CYCLE:
+                logger.info(f"[followup-antispam] Límite {MAX_FOLLOWUPS_PER_CYCLE} follow-ups/día alcanzado")
+                break
+
+            # Anti-spam: no enviar si el remitente está en blocklist
+            job_emails = app.get("emails_in_job", "")
+            if not job_emails or "@" not in str(job_emails):
+                logger.warning(f"No hay email para follow-up de {app['title']} @ {app['company']}")
+                continue
+
+            to_email = str(job_emails).split(",")[0].strip()
+            if _is_blocked_sender(to_email):
+                logger.info(f"[followup-blocklist] Ignorando follow-up a {to_email}")
+                continue
+
             days_since = int(app.get("days_since_apply", settings.followup_days))
             followup = master_agent.generate_followup_email(app, resume, days_since)
 
-            # Intentar obtener email de la empresa del job
-            job_emails = app.get("emails_in_job", "")
-            if job_emails and "@" in str(job_emails):
-                to_email = str(job_emails).split(",")[0].strip()
-            else:
-                logger.warning(
-                    f"No hay email para follow-up de {app['title']} @ {app['company']}"
+            if AUTO_EMAIL_DISABLED:
+                logger.info(f"[AUTO_EMAIL_DISABLED] No enviando follow-up a {to_email} — revisar manualmente")
+                whatsapp_tool.send_message(
+                    f"📧 Follow-up listo para *{app['company']}* ({app['title']}) — envío manual requerido."
                 )
                 continue
 
@@ -603,6 +713,7 @@ async def followup_task():
             )
 
             if sent:
+                followups_sent += 1
                 whatsapp_tool.send_message(
                     f"Envié follow-up a *{app['company']}* por el puesto *{app['title']}*"
                 )
@@ -707,89 +818,39 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Iniciando orchestrator...")
 
-    # Búsqueda de empleos: diario a medianoche
-    scheduler.add_job(
-        job_search_task,
-        "cron",
-        hour=0,
-        minute=0,
-        id="job_search",
-    )
-    # Email monitor: cada 6 horas
-    scheduler.add_job(
-        email_monitor_task,
-        "interval",
-        hours=6,
-        id="email_monitor",
-    )
-    scheduler.add_job(
-        followup_task,
-        "cron",
-        hour=9,
-        minute=0,
-        id="followup",
-    )
-    # LinkedIn messages: cada 5 minutos (listener autónomo)
-    scheduler.add_job(
-        linkedin_messages_task,
-        "interval",
-        minutes=5,
-        id="linkedin_messages",
-    )
-    # LinkedIn content: genera 1 post diario (inspector lo revisará antes de publicar)
-    scheduler.add_job(
-        linkedin_content_task,
-        "cron",
-        hour=8,
-        minute=0,
-        day_of_week="mon-fri",
-        id="linkedin_content",
-    )
-    # Búsqueda premium de empleos: diario a las 7am
-    scheduler.add_job(
-        premium_job_search_task,
-        "cron",
-        hour=7,
-        minute=0,
-        id="premium_job_search",
-    )
-    # Limpieza de imágenes huérfanas: domingos a las 3am
-    scheduler.add_job(
-        image_cleanup_task,
-        "cron",
-        hour=3,
-        minute=0,
-        day_of_week="sun",
-        id="image_cleanup",
-    )
-    # Expandir red de RH: 3pm Lunes a Viernes
-    scheduler.add_job(
-        linkedin_hr_expansion_task,
-        "cron",
-        hour=15,
-        minute=0,
-        day_of_week="mon-fri",
-        id="linkedin_hr_expansion",
-    )
-    # Inspección de infografías: cada 6h en horario laboral (9am, 3pm, 9pm) Lun-Vie
-    scheduler.add_job(
-        image_inspection_task,
-        "cron",
-        hour="9,15,21",
-        minute=30,
-        day_of_week="mon-fri",
-        id="image_inspection",
-    )
-    # Renovar cookies de LinkedIn automáticamente cada 12h
-    scheduler.add_job(
-        linkedin_cookie_refresh_task,
-        "interval",
-        hours=12,
-        id="linkedin_cookie_refresh",
-    )
+    # ── SCHEDULED TASKS (updated 2026-04-02) ────────────────────────────────
+    # DESACTIVADOS (respuestas automáticas pausadas):
+    # scheduler.add_job(email_monitor_task, "interval", hours=6, id="email_monitor")
+    # scheduler.add_job(followup_task, "cron", hour=9, minute=0, id="followup")
+    # scheduler.add_job(linkedin_messages_task, "interval", minutes=5, id="linkedin_messages")
+
+    # ── ACTIVOS ───────────────────────────────────────────────────────────
+
+    # Búsqueda de empleos: cada 3 horas
+    scheduler.add_job(job_search_task, "interval", hours=3, id="job_search")
+
+    # Búsqueda premium (score >= 82%): cada 3 horas, offset 90min vs job_search
+    scheduler.add_job(premium_job_search_task, "interval", hours=3, start_date="2026-04-02 01:30:00", id="premium_job_search")
+
+    # LinkedIn content: 3 posts diarios L-V (8am, 1pm, 5pm)
+    scheduler.add_job(linkedin_content_task, "cron", hour=8, minute=0, day_of_week="mon-fri", id="linkedin_content_morning")
+    scheduler.add_job(linkedin_content_task, "cron", hour=13, minute=0, day_of_week="mon-fri", id="linkedin_content_noon")
+    scheduler.add_job(linkedin_content_task, "cron", hour=17, minute=0, day_of_week="mon-fri", id="linkedin_content_evening")
+
+    # Expandir red de RH: L-V 3pm
+    scheduler.add_job(linkedin_hr_expansion_task, "cron", hour=15, minute=0, day_of_week="mon-fri", id="linkedin_hr_expansion")
+
+    # Inspección de infografías: L-V 9:30, 14:00, 18:00
+    scheduler.add_job(image_inspection_task, "cron", hour="9,14,18", minute=30, day_of_week="mon-fri", id="image_inspection")
+
+    # Limpieza de imágenes huérfanas: domingos 3am
+    scheduler.add_job(image_cleanup_task, "cron", hour=3, minute=0, day_of_week="sun", id="image_cleanup")
+
+    # Renovar cookies LinkedIn: cada 12h
+    scheduler.add_job(linkedin_cookie_refresh_task, "interval", hours=12, id="linkedin_cookie_refresh")
 
     scheduler.start()
-    logger.success("Scheduler iniciado")
+    logger.success("Scheduler iniciado (7 tasks activas, 3 desactivadas)")
 
     whatsapp_tool.send_message(
         "Agente de búsqueda de empleo activo.\n\n"
@@ -987,11 +1048,18 @@ async def get_stats_api():
 
 
 @app.get("/api/jobs")
-async def get_jobs_api(status: str = "found", limit: int = 100):
-    """Lista de jobs filtrada."""
+async def get_jobs_api(status: str = "all", limit: int = 500, min_score: int = 0, search: str = ""):
+    """Lista de jobs filtrada con búsqueda y score mínimo."""
     if status == "all":
-        return tracker.get_all_jobs(limit=limit)
-    return tracker.get_jobs_by_status(status)
+        jobs = tracker.get_all_jobs(limit=limit)
+    else:
+        jobs = tracker.get_jobs_by_status(status)
+    if min_score > 0:
+        jobs = [j for j in jobs if (j.get("match_score") or 0) >= min_score]
+    if search:
+        q = search.lower()
+        jobs = [j for j in jobs if q in (j.get("title") or "").lower() or q in (j.get("company") or "").lower()]
+    return jobs
 
 
 @app.get("/api/applications")

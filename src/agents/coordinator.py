@@ -43,6 +43,7 @@ TaskType = Literal[
     "content_validation",
     "hr_contact_note",
     "image_inspection",
+    "response_decision",  # gatekeeper de respuestas (email + LinkedIn)
 ]
 
 # Tareas que requieren calidad → GLM primero
@@ -51,7 +52,10 @@ QUALITY_TASKS = {
     "content_generation", "content_validation", "hr_contact_note",
 }
 # Tareas de volumen/velocidad → Groq primero (con fallback a GLM y SambaNova)
-VOLUME_TASKS  = {"job_match", "email_analysis", "search_criteria", "whatsapp_command", "browser_vision", "image_inspection"}
+VOLUME_TASKS  = {
+    "job_match", "email_analysis", "search_criteria", "whatsapp_command",
+    "browser_vision", "image_inspection", "response_decision",
+}
 
 
 def _build_glm(temperature: float, max_tokens: int):

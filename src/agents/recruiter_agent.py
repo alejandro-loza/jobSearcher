@@ -38,7 +38,7 @@ Perfil de Alejandro:
 - LinkedIn: https://www.linkedin.com/in/alejandro-hernandez-loza/
 - Open to Work: Sí
 - Modalidad preferida: Remoto
-- Disponibilidad para entrevistas: Lunes a Viernes, 9-11am o 3-4pm hora México
+- Disponibilidad para entrevistas: Lunes a Viernes, 7am-7pm hora México
 
 RESTRICCIONES DE NEGOCIACIÓN (NO negociables, rechazar amablemente si aplican):
 1. NO acepta contratos por honorarios (freelance/independiente en México)

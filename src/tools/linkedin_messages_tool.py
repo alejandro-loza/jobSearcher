@@ -18,6 +18,11 @@ from urllib.parse import quote
 import requests
 from loguru import logger
 
+# ── GLOBAL KILL SWITCH ────────────────────────────────────────────────────────
+# When True, send_message() will ALWAYS return False without sending anything.
+# This is the last line of defense — no LinkedIn message leaves the system.
+LINKEDIN_SENDING_BLOCKED = True
+
 from config import settings
 
 _MY_PROFILE_ID = "ACoAAA75U08B8QCgw24NcNxPaIYIH-OFh35cZ2Q"
@@ -383,12 +388,42 @@ def get_full_conversation(conversation_id: str, sender_name: str = "") -> List[D
 # 3. Send message via Playwright (direct URL navigation, fresh browser)
 # ---------------------------------------------------------------------------
 
-def send_message(conversation_id: str, text: str, sender_name: str = "") -> bool:
-    """Envía un mensaje clickeando la conversación en el sidebar de /messaging/.
+def send_message(
+    conversation_id: str,
+    text: str,
+    sender_name: str = "",
+    conversation_history: list = None,
+    _bypass_decision_agent: bool = False,
+) -> bool:
+    """Envía un mensaje de LinkedIn. REQUIERE aprobación del response_decision_agent.
 
-    Abre browser NUEVO, navega a /messaging/, clickea la conversación,
-    escribe el texto y envía con Enter.
+    Args:
+        conversation_id: ID de la conversación LinkedIn
+        text: Texto a enviar
+        sender_name: Nombre del destinatario (para contexto)
+        conversation_history: OBLIGATORIO — historial [{body/message_text, from_me, ...}]
+        _bypass_decision_agent: Solo True cuando Alejandro aprueba manualmente via WhatsApp
     """
+    # ── GLOBAL KILL SWITCH — nothing gets sent if True ────────────────────
+    if LINKEDIN_SENDING_BLOCKED:
+        logger.warning(f"[KILL SWITCH] LinkedIn msg a {sender_name or conversation_id} BLOQUEADO — LINKEDIN_SENDING_BLOCKED=True")
+        return False
+
+    # ── RESPONSE DECISION AGENT — última palabra ─────────────────────────
+    if not _bypass_decision_agent:
+        from src.agents.response_decision_agent import approve_outgoing
+        approved, reason = approve_outgoing(
+            to=sender_name or conversation_id,
+            subject=f"LinkedIn conversation {conversation_id[:20]}",
+            body=text,
+            conversation_history=conversation_history or [],
+            sender_name=sender_name,
+            source="linkedin",
+        )
+        if not approved:
+            logger.warning(f"[decision_agent] LinkedIn msg a {sender_name or conversation_id} RECHAZADO — {reason}")
+            return False
+
     try:
         pw, browser, page = _build_playwright_context()
 

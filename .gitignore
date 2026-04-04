@@ -41,6 +41,8 @@ ENV/
 config/linkedin_cookies.json
 config/google_credentials.json
 config/google_token.json
+config/gmail_token.json
+config/calendar_token.json
 config/linkedin_profile.json
 
 # Logs

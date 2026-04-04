@@ -168,8 +168,7 @@ def get_free_slots(
         Lista de slots disponibles con: date, start, end, label
     """
     PREFERRED_WINDOWS = [
-        (time(9, 0),  time(11, 0)),   # 9am - 11am
-        (time(15, 0), time(16, 0)),   # 3pm - 4pm
+        (time(7, 0), time(19, 0)),    # 7am - 7pm (Lunes a Viernes)
     ]
     TIMEZONE = "America/Mexico_City"
 
