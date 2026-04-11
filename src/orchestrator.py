@@ -656,18 +656,27 @@ async def image_inspection_task():
 
 
 async def linkedin_cookie_refresh_task():
-    """Renueva cookies de LinkedIn automáticamente via login."""
-    logger.info("Renovando cookies de LinkedIn...")
+    """Verifica si las cookies de LinkedIn siguen válidas y notifica si no."""
+    logger.info("Verificando cookies de LinkedIn...")
     try:
-        success = await asyncio.to_thread(
-            linkedin_messages_tool.refresh_cookies
-        )
-        if success:
-            logger.success("Cookies de LinkedIn renovadas automáticamente")
+        from src.tools import whatsapp_tool
+        from src.tools.linkedin_messages_tool import _build_session, _test_session
+
+        session = _build_session()
+        valid = await asyncio.to_thread(_test_session, session)
+
+        if valid:
+            logger.success("Cookies de LinkedIn OK")
         else:
-            logger.warning("No se pudieron renovar cookies de LinkedIn")
+            logger.warning("Cookies de LinkedIn EXPIRADAS — notificando a Alejandro")
+            whatsapp_tool.send_message(
+                "⚠️ *LinkedIn cookies expiradas*\n\n"
+                "Las cookies de LinkedIn dejaron de funcionar.\n"
+                "Por favor actualiza `li_at` y `JSESSIONID` usando EditThisCookie en tu browser.\n\n"
+                "Ve a linkedin.com → EditThisCookie → copia li_at y JSESSIONID → pégalos aquí."
+            )
     except Exception as e:
-        logger.error(f"Error renovando cookies LinkedIn: {e}")
+        logger.error(f"Error verificando cookies LinkedIn: {e}")
 
 
 async def followup_task():
@@ -811,6 +820,62 @@ def _handle_interview_scheduling(
         logger.error(f"Error agendando entrevista: {e}")
 
 
+# --- STALKER TASKS ---
+
+# 30 empresas divididas en 6 grupos de 5, cada grupo corre cada 2h escalonados
+STALKER_GROUPS = {
+    "A": ["Thomson Reuters", "Globant", "EPAM", "Nubank", "Mercado Libre"],
+    "B": ["Uber", "Stripe", "Twilio", "GitHub", "NVIDIA"],
+    "C": ["Endava", "Wizeline", "Bitso", "Clip", "Rappi"],
+    "D": ["Citi", "Deutsche Bank", "BlackRock", "Plaid", "HSBC"],
+    "E": ["Samsara", "Roku", "Thoughtworks", "Capgemini", "Cognizant"],
+    "F": ["Konfio", "Kueski", "Conekta", "Kavak", "Allstate"],
+}
+
+
+async def stalker_group_task(group_name: str):
+    """Stalkea un grupo de empresas."""
+    companies = STALKER_GROUPS.get(group_name, [])
+    if not companies:
+        return
+    logger.info(f"[STALKER] Ejecutando grupo {group_name}: {companies}")
+    try:
+        from src.agents import company_stalker_agent
+        results = await asyncio.to_thread(
+            company_stalker_agent.stalk_multiple, companies
+        )
+        total_matched = sum(r.get("matched", 0) for r in results)
+        total_applied = sum(r.get("applied", 0) for r in results)
+        if total_matched > 0:
+            logger.success(
+                f"[STALKER] Grupo {group_name}: {total_matched} matches, {total_applied} aplicadas"
+            )
+    except Exception as e:
+        logger.error(f"[STALKER] Error en grupo {group_name}: {e}")
+
+
+async def thomson_reuters_stalker_task():
+    """Stalker dedicado a Thomson Reuters — corre cada hora."""
+    logger.info("[TR-STALKER] Ejecutando búsqueda dedicada...")
+    try:
+        from src.agents import thomson_reuters_stalker
+        result = await asyncio.to_thread(thomson_reuters_stalker.stalk)
+        matched = result.get("matched", 0)
+        total = result.get("total_found", 0)
+        logger.info(f"[TR-STALKER] Resultado: {total} encontradas, {matched} match")
+    except Exception as e:
+        logger.error(f"[TR-STALKER] Error: {e}")
+
+
+# Funciones individuales para el scheduler (necesita callable sin args)
+async def stalker_group_A(): await stalker_group_task("A")
+async def stalker_group_B(): await stalker_group_task("B")
+async def stalker_group_C(): await stalker_group_task("C")
+async def stalker_group_D(): await stalker_group_task("D")
+async def stalker_group_E(): await stalker_group_task("E")
+async def stalker_group_F(): await stalker_group_task("F")
+
+
 # --- FASTAPI APP ---
 
 @asynccontextmanager
@@ -837,8 +902,8 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(linkedin_content_task, "cron", hour=13, minute=0, day_of_week="mon-fri", id="linkedin_content_noon")
     scheduler.add_job(linkedin_content_task, "cron", hour=17, minute=0, day_of_week="mon-fri", id="linkedin_content_evening")
 
-    # Expandir red de RH: L-V 3pm
-    scheduler.add_job(linkedin_hr_expansion_task, "cron", hour=15, minute=0, day_of_week="mon-fri", id="linkedin_hr_expansion")
+    # DESACTIVADO: LinkedIn bloquea búsqueda de personas desde servidor (API + Playwright)
+    # scheduler.add_job(linkedin_hr_expansion_task, "cron", hour=15, minute=0, day_of_week="mon-fri", id="linkedin_hr_expansion")
 
     # Inspección de infografías: L-V 9:30, 14:00, 18:00
     scheduler.add_job(image_inspection_task, "cron", hour="9,14,18", minute=30, day_of_week="mon-fri", id="image_inspection")
@@ -849,8 +914,25 @@ async def lifespan(app: FastAPI):
     # Renovar cookies LinkedIn: cada 12h
     scheduler.add_job(linkedin_cookie_refresh_task, "interval", hours=12, id="linkedin_cookie_refresh")
 
+    # ── THOMSON REUTERS STALKER DEDICADO: cada hora ────────────────────
+    scheduler.add_job(thomson_reuters_stalker_task, "interval", hours=1, id="tr_stalker")
+
+    # ── STALKER JOBS: 6 grupos, cada 2h, escalonados 20min ──────────────
+    # Grupo A (TR, Globant, EPAM, Nubank, MeLi): minuto 0
+    scheduler.add_job(stalker_group_A, "interval", hours=2, start_date="2026-04-06 19:00:00", id="stalker_A")
+    # Grupo B (Uber, Stripe, Twilio, GitHub, NVIDIA): minuto 20
+    scheduler.add_job(stalker_group_B, "interval", hours=2, start_date="2026-04-06 19:20:00", id="stalker_B")
+    # Grupo C (Endava, Wizeline, Bitso, Clip, Rappi): minuto 40
+    scheduler.add_job(stalker_group_C, "interval", hours=2, start_date="2026-04-06 19:40:00", id="stalker_C")
+    # Grupo D (Capital One, Citi, DB, BlackRock, Plaid): minuto 0 +1h
+    scheduler.add_job(stalker_group_D, "interval", hours=2, start_date="2026-04-06 20:00:00", id="stalker_D")
+    # Grupo E (Samsara, Roku, Thoughtworks, Capgemini, Cognizant): minuto 20 +1h
+    scheduler.add_job(stalker_group_E, "interval", hours=2, start_date="2026-04-06 20:20:00", id="stalker_E")
+    # Grupo F (Konfio, Kueski, Conekta, Kavak, Allstate): minuto 40 +1h
+    scheduler.add_job(stalker_group_F, "interval", hours=2, start_date="2026-04-06 20:40:00", id="stalker_F")
+
     scheduler.start()
-    logger.success("Scheduler iniciado (7 tasks activas, 3 desactivadas)")
+    logger.success("Scheduler iniciado (13 tasks activas: 7 originales + 6 stalker groups)")
 
     whatsapp_tool.send_message(
         "Agente de búsqueda de empleo activo.\n\n"
@@ -1068,6 +1150,18 @@ async def get_applications_api(limit: int = 100):
     return tracker.get_full_pipeline(limit=limit)
 
 
+@app.get("/api/applications/failed")
+async def get_failed_applications_api():
+    """Aplicaciones que fallaron y necesitan atención."""
+    return tracker.get_failed_applications()
+
+
+@app.get("/api/applications/stats")
+async def get_application_stats_api():
+    """Estadísticas de aplicaciones por status."""
+    return tracker.get_application_stats()
+
+
 @app.get("/api/conversations")
 async def get_conversations_api():
     """Conversaciones de LinkedIn unread/pendientes."""
@@ -1160,6 +1254,56 @@ async def trigger_image_cleanup():
     """Trigger manual: limpieza de imágenes huérfanas ahora."""
     scheduler.add_job(image_cleanup_task, "date", id="manual_image_cleanup", replace_existing=True)
     return {"ok": True, "message": "Limpieza de imágenes en proceso"}
+
+
+@app.post("/trigger/tr-stalker")
+async def trigger_tr_stalker():
+    """Trigger manual: stalker dedicado de Thomson Reuters."""
+    scheduler.add_job(thomson_reuters_stalker_task, "date", id="manual_tr_stalker", replace_existing=True)
+    return {"ok": True, "message": "Thomson Reuters stalker ejecutando búsqueda exhaustiva"}
+
+
+@app.get("/tr-stalker/stats")
+async def get_tr_stalker_stats():
+    """Retorna estadísticas del stalker de Thomson Reuters."""
+    try:
+        from src.agents import thomson_reuters_stalker
+        return thomson_reuters_stalker.get_stats()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/tr-stalker/jobs")
+async def get_tr_stalker_jobs():
+    """Retorna todas las vacantes conocidas de Thomson Reuters."""
+    try:
+        from src.agents import thomson_reuters_stalker
+        return {"jobs": thomson_reuters_stalker.get_all_known_jobs()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/trigger/stalker")
+async def trigger_stalker(group: str = "A"):
+    """Trigger manual: ejecutar stalker para un grupo (A-F) o 'all'."""
+    if group == "all":
+        for g in ["A", "B", "C", "D", "E", "F"]:
+            scheduler.add_job(stalker_group_task, "date", args=[g], id=f"manual_stalker_{g}", replace_existing=True)
+        return {"ok": True, "message": "Stalker ejecutando todos los grupos"}
+    if group in STALKER_GROUPS:
+        scheduler.add_job(stalker_group_task, "date", args=[group], id=f"manual_stalker_{group}", replace_existing=True)
+        return {"ok": True, "message": f"Stalker grupo {group} en proceso: {STALKER_GROUPS[group]}"}
+    return {"ok": False, "message": f"Grupo inválido: {group}. Usa A-F o 'all'"}
+
+
+@app.get("/stalker/stats")
+async def get_stalker_stats():
+    """Retorna estadísticas del stalker."""
+    try:
+        from src.agents import company_stalker_agent
+        return company_stalker_agent.get_stalker_stats()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/linkedin/posts")

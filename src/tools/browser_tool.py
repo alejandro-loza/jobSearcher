@@ -818,37 +818,57 @@ async def apply_to_job_url(
 
     from src.tools import whatsapp_tool
 
+    _PROFILE_DIR = "data/linkedin_browser_profile"
+
     async with async_playwright() as p:
-        browser: Browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"],
-        )
-        context: BrowserContext = await browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-        )
+        is_linkedin = "linkedin.com" in job_url
 
-        # Cargar cookies de LinkedIn si la URL es de LinkedIn
-        if "linkedin.com" in job_url:
-            try:
-                import json as _json
-                with open(settings.linkedin_cookies_file) as f:
-                    linkedin_cookies = _json.load(f)
-                cookies = []
-                if isinstance(linkedin_cookies, dict):
-                    for name, value in linkedin_cookies.items():
-                        cookies.append({"name": name, "value": value, "domain": ".linkedin.com", "path": "/"})
-                elif isinstance(linkedin_cookies, list):
-                    cookies = linkedin_cookies
-                await context.add_cookies(cookies)
-                logger.debug("Cookies de LinkedIn cargadas en el browser")
-            except Exception as e:
-                logger.warning(f"No se pudieron cargar cookies de LinkedIn: {e}")
+        if is_linkedin:
+            import os
+            os.makedirs(_PROFILE_DIR, exist_ok=True)
+            context: BrowserContext = await p.chromium.launch_persistent_context(
+                user_data_dir=_PROFILE_DIR,
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox",
+                      "--disable-blink-features=AutomationControlled"],
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 800},
+            )
+            # Inyectar cookies solo si no están en el perfil
+            existing = {c["name"] for c in await context.cookies("https://www.linkedin.com")}
+            if "li_at" not in existing:
+                try:
+                    import json as _json
+                    with open(settings.linkedin_cookies_file) as f:
+                        linkedin_cookies = _json.load(f)
+                    cookies = []
+                    if isinstance(linkedin_cookies, dict):
+                        for name, value in linkedin_cookies.items():
+                            cookies.append({"name": name, "value": value, "domain": ".linkedin.com", "path": "/"})
+                    elif isinstance(linkedin_cookies, list):
+                        cookies = linkedin_cookies
+                    await context.add_cookies(cookies)
+                    logger.debug("Cookies de LinkedIn inyectadas al perfil persistente")
+                except Exception as e:
+                    logger.warning(f"No se pudieron cargar cookies de LinkedIn: {e}")
+            browser = None  # persistent context = browser + context
+        else:
+            browser: Browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox"],
+            )
+            context: BrowserContext = await browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
 
-        page: Page = await context.new_page()
+        page: Page = context.pages[0] if context.pages else await context.new_page()
 
         try:
             await page.goto(job_url, wait_until="domcontentloaded", timeout=60000)
@@ -1011,7 +1031,9 @@ async def apply_to_job_url(
                 "url": job_url,
             }
         finally:
-            await browser.close()
+            await context.close()
+            if browser:
+                await browser.close()
 
 
 def apply_to_job_sync(

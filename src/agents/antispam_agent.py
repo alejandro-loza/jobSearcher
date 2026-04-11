@@ -22,6 +22,12 @@ from loguru import logger
 
 BLOCKED_ADDRESSES: set[str] = {
     "padma@ptechpartners.com",
+    # Nathan Shen — recruiter de Audible. Alejandro maneja esta relación personalmente.
+    "vsnathan@audible.com",
+    # David Han — recruiting coordinator de Audible
+    "davihany@audible.com",
+    # Martha Carolina Ornelas — scheduling team Audible
+    "mcaroloe@audible.com",
 }
 
 # Contactos personales — NUNCA enviar emails automáticos

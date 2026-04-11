@@ -122,6 +122,10 @@ class JobTracker:
             # Quién respondió: 'pending' | 'auto' | 'alejandro' | 'skipped'
             ("emails",              "responded_by",    "TEXT DEFAULT 'pending'"),
             ("linkedin_messages",   "responded_by",    "TEXT DEFAULT 'pending'"),
+            # Application attempt tracking
+            ("applications",        "attempt_count",   "INTEGER DEFAULT 1"),
+            ("applications",        "failure_reason",  "TEXT DEFAULT ''"),
+            ("applications",        "apply_method_detail", "TEXT DEFAULT ''"),
         ]
         existing = {}
         for table, col, _ in migrations:
@@ -196,27 +200,110 @@ class JobTracker:
 
     # --- APPLICATIONS ---
 
+    # Application status values:
+    #   applied          - aplicación enviada exitosamente
+    #   apply_attempted  - se intentó aplicar (en progreso)
+    #   apply_failed     - falló el intento (browser error, form error)
+    #   apply_captcha    - detenido por captcha
+    #   apply_needs_manual - requiere intervención manual
+    #   apply_blocked    - portal bloqueó la aplicación
+    #   rejected         - empresa rechazó
+    #   interview        - avanzó a entrevista
+    #   offer            - recibió oferta
+
     def save_application(
         self, job_id: str, method: str = "linkedin", cover_letter: str = "",
-        status: str = "applied"
+        status: str = "applied", failure_reason: str = "", method_detail: str = "",
     ) -> int:
         with _db_lock:
             with self._get_conn() as conn:
-                cursor = conn.execute(
-                    """INSERT INTO applications (job_id, method, cover_letter, status)
-                       VALUES (?, ?, ?, ?)""",
-                    (job_id, method, cover_letter, status),
-                )
-                job_status = "applied" if status == "applied" else "pending_apply"
-                conn.execute("UPDATE jobs SET status=? WHERE id=?", (job_status, job_id))
-                return cursor.lastrowid
+                # Check if there's already an application for this job
+                existing = conn.execute(
+                    "SELECT id, attempt_count FROM applications WHERE job_id = ?", (job_id,)
+                ).fetchone()
 
-    def update_application_status(self, job_id: str, status: str):
+                if existing:
+                    # Update existing application with new attempt
+                    attempt = (existing[1] or 1) + 1
+                    conn.execute(
+                        """UPDATE applications
+                           SET status=?, method=?, failure_reason=?,
+                               apply_method_detail=?, attempt_count=?,
+                               last_activity=datetime('now')
+                           WHERE job_id=?""",
+                        (status, method, failure_reason, method_detail, attempt, job_id),
+                    )
+                    app_id = existing[0]
+                else:
+                    cursor = conn.execute(
+                        """INSERT INTO applications
+                           (job_id, method, cover_letter, status, failure_reason,
+                            apply_method_detail, attempt_count, last_activity)
+                           VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'))""",
+                        (job_id, method, cover_letter, status, failure_reason, method_detail),
+                    )
+                    app_id = cursor.lastrowid
+
+                # Update job status to match
+                JOB_STATUS_MAP = {
+                    "applied": "applied",
+                    "apply_attempted": "applying",
+                    "apply_failed": "apply_failed",
+                    "apply_captcha": "apply_needs_manual",
+                    "apply_needs_manual": "apply_needs_manual",
+                    "apply_blocked": "apply_failed",
+                    "interview": "interview",
+                    "offer": "offer",
+                    "rejected": "rejected",
+                }
+                job_status = JOB_STATUS_MAP.get(status, "found")
+                conn.execute("UPDATE jobs SET status=? WHERE id=?", (job_status, job_id))
+                return app_id
+
+    def update_application_status(self, job_id: str, status: str, failure_reason: str = ""):
         with self._get_conn() as conn:
             conn.execute(
-                "UPDATE applications SET status = ? WHERE job_id = ?",
-                (status, job_id),
+                """UPDATE applications
+                   SET status=?, failure_reason=?, last_activity=datetime('now')
+                   WHERE job_id=?""",
+                (status, failure_reason, job_id),
             )
+            # Also update job status
+            JOB_STATUS_MAP = {
+                "applied": "applied",
+                "apply_failed": "apply_failed",
+                "apply_needs_manual": "apply_needs_manual",
+                "interview": "interview",
+                "offer": "offer",
+                "rejected": "rejected",
+            }
+            job_status = JOB_STATUS_MAP.get(status)
+            if job_status:
+                conn.execute("UPDATE jobs SET status=? WHERE id=?", (job_status, job_id))
+
+    def get_failed_applications(self) -> List[Dict]:
+        """Jobs donde falló la aplicación automática."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT j.*, a.status as app_status, a.failure_reason,
+                          a.method, a.attempt_count, a.apply_method_detail
+                   FROM jobs j
+                   JOIN applications a ON j.id = a.job_id
+                   WHERE a.status IN ('apply_failed', 'apply_captcha',
+                                      'apply_needs_manual', 'apply_blocked')
+                   ORDER BY a.last_activity DESC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_application_stats(self) -> Dict:
+        """Estadísticas de aplicaciones por status."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) as count FROM applications GROUP BY status"
+            ).fetchall()
+            stats = {r[0]: r[1] for r in rows}
+            stats["total"] = sum(stats.values())
+            return stats
 
     def get_applications_pending_followup(self) -> List[Dict]:
         """Jobs aplicados hace mas de FOLLOWUP_DAYS sin respuesta."""

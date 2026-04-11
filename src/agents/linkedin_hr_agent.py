@@ -3,6 +3,10 @@ LinkedIn HR Agent.
 
 Finds HR/Recruiter contacts at target companies on LinkedIn and sends
 personalized connection requests to expand Alejandro's network.
+
+Uses linkedin_api (HTTP API) for searching contacts.
+Uses linkedin_api for sending connection requests.
+NO Playwright — avoids anti-bot blocks.
 """
 import json
 import os
@@ -11,8 +15,15 @@ from datetime import datetime
 from typing import Optional
 
 from loguru import logger
+from linkedin_api import Linkedin
+from requests.cookies import RequestsCookieJar
 
 from config import settings
+
+# ---------------------------------------------------------------------------
+# Kill switch
+# ---------------------------------------------------------------------------
+LINKEDIN_CONNECTIONS_BLOCKED = True  # LinkedIn blocks people search from server IPs
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,16 +58,49 @@ CANDIDATE_TECH = "Java, Spring Boot, Microservicios, Cloud (GCP/AWS), Docker y K
 MAX_REQUESTS_PER_DAY = 20
 NOTE_MAX_CHARS = 300  # LinkedIn connection note limit
 
-# Search URL pattern: LinkedIn people search filtered by company and recruiter keywords
-_SEARCH_URL_TEMPLATE = (
-    "https://www.linkedin.com/search/results/people/"
-    "?keywords={keywords}&origin=GLOBAL_SEARCH_HEADER"
-)
+# Round-robin: process N companies per run to stay within API rate limits
+COMPANIES_PER_RUN = 6
 
+# HR keywords to filter contacts by title
+HR_TITLE_KEYWORDS = [
+    "recruiter", "talent", "hr", "human resources", "recursos humanos",
+    "reclutador", "people", "staffing", "acquisition",
+]
 
 # ---------------------------------------------------------------------------
-# Cookie / Playwright helpers
+# LinkedIn API helper (singleton)
 # ---------------------------------------------------------------------------
+
+_api_instance = None
+
+
+def _get_linkedin_api() -> Linkedin:
+    """Return authenticated linkedin_api instance."""
+    global _api_instance
+    if _api_instance is not None:
+        return _api_instance
+
+    cookies = _load_cookies()
+    li_at = cookies.get("li_at", "")
+    jsessionid = cookies.get("JSESSIONID", "").replace('"', '')
+
+    if not li_at:
+        raise RuntimeError("No li_at cookie found in config/linkedin_cookies.json")
+
+    jar = RequestsCookieJar()
+    jar.set("li_at", li_at, domain=".linkedin.com")
+    jar.set("JSESSIONID", f'"{jsessionid}"', domain=".linkedin.com")
+
+    _api_instance = Linkedin("", "", cookies=jar)
+    logger.info("[hr_agent] LinkedIn API authenticated")
+    return _api_instance
+
+
+def _reset_api():
+    """Reset API instance (e.g. after cookie refresh)."""
+    global _api_instance
+    _api_instance = None
+
 
 def _load_cookies() -> dict:
     try:
@@ -65,36 +109,6 @@ def _load_cookies() -> dict:
     except Exception as e:
         logger.error(f"[hr_agent] Error loading cookies: {e}")
         return {}
-
-
-def _build_playwright_context():
-    """Returns (playwright, browser, context, page) with LinkedIn cookies loaded."""
-    from playwright.sync_api import sync_playwright
-
-    cookies = _load_cookies()
-    li_at = cookies.get("li_at", "")
-    jsessionid = cookies.get("JSESSIONID", "").replace('"', '')
-
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-    )
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-    )
-    context.add_cookies([
-        {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"},
-        {"name": "JSESSIONID", "value": jsessionid, "domain": ".www.linkedin.com", "path": "/"},
-    ])
-    page = context.new_page()
-    page.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    return pw, browser, context, page
 
 
 # ---------------------------------------------------------------------------
@@ -142,99 +156,63 @@ def _already_contacted(log: dict, profile_url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def search_hr_contacts(company: str, limit: int = 5) -> list:
-    """Search LinkedIn for HR/Recruiter contacts at a company.
-    Uses Playwright to search people with recruiter/HR keywords at the company.
+    """Search LinkedIn for HR/Recruiter contacts at a company via linkedin_api.
     Returns list of: {name, title, profile_url, vanity_name, company}"""
-    pw = None
-    browser = None
     contacts = []
+    seen_ids = set()
 
     try:
-        pw, browser, context, page = _build_playwright_context()
+        api = _get_linkedin_api()
 
-        # Build search query: recruiter OR "talent acquisition" at company
-        keywords = f'recruiter OR "talent acquisition" OR "HR" "{company}"'
-        from urllib.parse import quote
-        url = _SEARCH_URL_TEMPLATE.format(keywords=quote(keywords))
+        # Search with different HR-related title keywords
+        search_titles = ["recruiter", "talent acquisition", "HR"]
 
-        logger.info(f"[hr_agent] Searching HR contacts at {company}...")
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(4)
-
-        # LinkedIn 2025/2026: uses obfuscated CSS classes. Results live inside
-        # div[role="list"] with <a href="/in/..."> links containing name + title.
-        profile_links = page.locator('div[role="list"] a[href*="/in/"]')
-        count = profile_links.count()
-        logger.info(f"[hr_agent] Found {count} profile links for {company}")
-
-        seen_urls: set = set()
-
-        for i in range(count):
+        for title_kw in search_titles:
             if len(contacts) >= limit:
                 break
+
+            keywords = f"{title_kw} {company}"
+            logger.info(f"[hr_agent] API search: '{keywords}'")
+
             try:
-                link = profile_links.nth(i)
-                href = link.get_attribute("href", timeout=2000) or ""
+                results = api.search_people(keywords=keywords, limit=limit)
+            except Exception as e:
+                logger.warning(f"[hr_agent] API search failed for '{keywords}': {e}")
+                continue
 
-                if "/in/" not in href:
+            for r in results:
+                public_id = r.get("public_id", "")
+                if not public_id or public_id in seen_ids:
                     continue
 
-                # Clean URL
-                profile_url = href.split("?")[0]
-                if not profile_url.startswith("http"):
-                    profile_url = "https://www.linkedin.com" + profile_url
+                headline = r.get("headline", "") or ""
+                headline_lower = headline.lower()
 
-                if profile_url in seen_urls:
+                # Filter: must have HR keyword in headline
+                if not any(kw in headline_lower for kw in HR_TITLE_KEYWORDS):
                     continue
 
-                text = link.inner_text(timeout=2000).strip()
-                lines = [l.strip() for l in text.split("\n") if l.strip()]
-
-                # The main result link has 3+ lines: name, degree, title, location
-                # Skip small name-only links (duplicates)
-                if len(lines) < 3:
-                    continue
-
-                seen_urls.add(profile_url)
-                name = lines[0]
-                # lines[1] is usually "• 2nd" or degree indicator
-                title = lines[2] if len(lines) > 2 else ""
-
-                # Filter by HR/recruiter keywords in title
-                title_lower = title.lower()
-                hr_keywords = ["recruiter", "talent", "hr", "human resources", "recursos humanos",
-                               "reclutador", "people", "staffing", "acquisition"]
-                if not any(kw in title_lower for kw in hr_keywords):
-                    continue
-
-                # Extract vanity name from URL for direct invite
-                vanity = ""
-                if "/in/" in profile_url:
-                    vanity = profile_url.rstrip("/").split("/in/")[-1]
+                seen_ids.add(public_id)
+                profile_url = f"https://www.linkedin.com/in/{public_id}"
+                name = f"{r.get('firstName', '')} {r.get('lastName', '')}".strip()
 
                 contacts.append({
                     "name": name,
-                    "title": title,
+                    "title": headline,
                     "profile_url": profile_url,
-                    "vanity_name": vanity,
+                    "vanity_name": public_id,
                     "company": company,
                 })
-                logger.debug(f"[hr_agent] Found contact: {name} | {title} @ {company}")
+                logger.debug(f"[hr_agent] Found: {name} | {headline} @ {company}")
 
-            except Exception as card_err:
-                logger.debug(f"[hr_agent] Error parsing link {i}: {card_err}")
-                continue
+                if len(contacts) >= limit:
+                    break
+
+            # Rate limit between API calls
+            time.sleep(2)
 
     except Exception as e:
         logger.error(f"[hr_agent] Error searching contacts at {company}: {e}")
-    finally:
-        try:
-            if browser:
-                browser.close()
-            if pw:
-                pw.stop()
-        except Exception:
-            pass
 
     logger.info(f"[hr_agent] Found {len(contacts)} HR contacts at {company}")
     return contacts
@@ -248,11 +226,21 @@ def send_connection_request(
     company: str,
     vanity_name: Optional[str] = None,
 ) -> bool:
-    """Navigate to the direct invite URL and send a personalized connection request.
-    Uses /preload/custom-invite/?vanityName=... for reliable dialog access.
+    """Send a personalized connection request via linkedin_api.
     Returns True if request was sent successfully."""
-    pw = None
-    browser = None
+
+    if LINKEDIN_CONNECTIONS_BLOCKED:
+        logger.warning(f"[hr_agent] CONNECTIONS BLOCKED — not sending to {contact_name}")
+        return False
+
+    # Extract vanity name (public_id) from profile URL if not provided
+    if not vanity_name:
+        if "/in/" in profile_url:
+            vanity_name = profile_url.rstrip("/").split("/in/")[-1].split("?")[0]
+
+    if not vanity_name:
+        logger.error(f"[hr_agent] Cannot extract vanity name from: {profile_url}")
+        return False
 
     # Build personalized note (max 300 chars)
     first_name = contact_name.split()[0] if contact_name else "there"
@@ -261,145 +249,33 @@ def send_connection_request(
         f"de experiencia en Java/Spring Boot. Me interesa conectar y explorar oportunidades "
         f"en {company}. Tengo experiencia en {CANDIDATE_TECH}. ¡Gracias!"
     )
-    # Truncate if over limit
     if len(note) > NOTE_MAX_CHARS:
         note = note[:NOTE_MAX_CHARS - 3] + "..."
 
     try:
-        pw, browser, context, page = _build_playwright_context()
-
-        # Extract vanity name from profile URL if not provided
-        if not vanity_name:
-            if "/in/" in profile_url:
-                vanity_name = profile_url.rstrip("/").split("/in/")[-1].split("?")[0]
-
-        if not vanity_name:
-            logger.error(f"[hr_agent] Cannot extract vanity name from: {profile_url}")
-            return False
-
-        # Navigate directly to the invite dialog URL
-        invite_url = f"https://www.linkedin.com/preload/custom-invite/?vanityName={vanity_name}"
-        logger.info(f"[hr_agent] Navigating to invite URL for {contact_name}: {invite_url}")
-        page.goto(invite_url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
-
-        # Click "Add a note" / "Añadir una nota"
-        add_note_selectors = [
-            'button:has-text("Add a note")',
-            'button:has-text("Añadir una nota")',
-            'button[aria-label="Add a note"]',
-            'button[aria-label="Añadir una nota"]',
-        ]
-
-        clicked_add_note = False
-        for selector in add_note_selectors:
-            try:
-                btn = page.locator(selector).first
-                if btn.is_visible(timeout=3000) and btn.is_enabled(timeout=1000):
-                    btn.click()
-                    logger.info(f"[hr_agent] Clicked 'Add a note' via: {selector}")
-                    clicked_add_note = True
-                    time.sleep(2)
-                    break
-            except Exception:
-                continue
-
-        if not clicked_add_note:
-            # Maybe the dialog didn't appear (already connected or pending)
-            # Check if we see "Pending" or already connected indicators
-            page_text = page.inner_text("body", timeout=3000)
-            if "pending" in page_text.lower() or "pendiente" in page_text.lower():
-                logger.warning(f"[hr_agent] Connection already pending for {contact_name}")
-                return False
-            # Try sending without note as fallback
-            send_no_note_selectors = [
-                'button:has-text("Send without a note")',
-                'button:has-text("Enviar sin nota")',
-            ]
-            for selector in send_no_note_selectors:
-                try:
-                    btn = page.locator(selector).first
-                    if btn.is_visible(timeout=2000) and btn.is_enabled(timeout=1000):
-                        btn.click()
-                        logger.info(f"[hr_agent] Sent without note to {contact_name}")
-                        time.sleep(2)
-                        return True
-                except Exception:
-                    continue
-            logger.warning(f"[hr_agent] Invite dialog not found for: {contact_name}")
-            return False
-
-        # Type the note in the textarea
-        note_textareas = [
-            'textarea[name="message"]',
-            'textarea',
-        ]
-
-        note_typed = False
-        for selector in note_textareas:
-            try:
-                ta = page.locator(selector).first
-                if ta.is_visible(timeout=3000):
-                    ta.click()
-                    ta.fill(note)
-                    note_typed = True
-                    logger.info("[hr_agent] Note typed successfully")
-                    break
-            except Exception:
-                continue
-
-        if not note_typed:
-            logger.warning("[hr_agent] Could not type note, will try to send anyway")
-
-        time.sleep(1)
-
-        # Click Send / Enviar
-        send_selectors = [
-            'button:has-text("Send")',
-            'button:has-text("Enviar")',
-            'button[aria-label="Send now"]',
-            'button[aria-label="Enviar ahora"]',
-            'button[aria-label="Send invitation"]',
-            'button[aria-label="Enviar invitación"]',
-        ]
-
-        sent = False
-        for selector in send_selectors:
-            try:
-                btn = page.locator(selector).first
-                if btn.is_visible(timeout=2000) and btn.is_enabled(timeout=1000):
-                    btn.click()
-                    logger.info(f"[hr_agent] Clicked Send via: {selector}")
-                    sent = True
-                    break
-            except Exception:
-                continue
-
-        if sent:
-            time.sleep(2)
-            logger.info(f"[hr_agent] Connection request sent to {contact_name} @ {company}")
-        else:
-            logger.error(f"[hr_agent] Failed to click Send for {contact_name}")
-
-        return sent
-
+        api = _get_linkedin_api()
+        api.add_connection(vanity_name, message=note)
+        logger.info(f"[hr_agent] Connection request sent to {contact_name} @ {company}")
+        return True
     except Exception as e:
-        logger.error(f"[hr_agent] Error sending connection request to {profile_url}: {e}")
+        error_msg = str(e).lower()
+        if "already" in error_msg or "pending" in error_msg:
+            logger.info(f"[hr_agent] Already connected/pending: {contact_name}")
+            return False
+        logger.error(f"[hr_agent] Error sending connection to {contact_name}: {e}")
         return False
-    finally:
-        try:
-            if browser:
-                browser.close()
-            if pw:
-                pw.stop()
-        except Exception:
-            pass
 
 
 def expand_hr_network(max_requests: int = 10) -> dict:
     """Main function: iterate target companies, find HR contacts, send requests.
+    Uses round-robin: processes COMPANIES_PER_RUN companies per execution.
     Limits to max_requests per run to avoid LinkedIn limits.
     Returns: {sent: int, failed: int, contacts_found: list}"""
+
+    if LINKEDIN_CONNECTIONS_BLOCKED:
+        logger.warning("[hr_agent] CONNECTIONS BLOCKED — skipping expansion")
+        return {"sent": 0, "failed": 0, "contacts_found": []}
+
     log = _load_log()
     result = {"sent": 0, "failed": 0, "contacts_found": []}
 
@@ -410,22 +286,23 @@ def expand_hr_network(max_requests: int = 10) -> dict:
         return result
 
     remaining = min(max_requests, MAX_REQUESTS_PER_DAY - today_count)
-    logger.info(f"[hr_agent] Starting HR network expansion. Max requests: {remaining}")
 
-    # Determine which companies to prioritize (ones not yet contacted recently)
-    contacted_companies = set()
-    for req in log.get("requests_sent", []):
-        if req.get("company"):
-            contacted_companies.add(req["company"])
+    # Round-robin: pick next batch of companies
+    last_idx = log.get("last_company_index", 0)
+    batch = TARGET_COMPANIES[last_idx : last_idx + COMPANIES_PER_RUN]
+    if len(batch) < COMPANIES_PER_RUN:
+        batch += TARGET_COMPANIES[: COMPANIES_PER_RUN - len(batch)]
+    next_idx = (last_idx + COMPANIES_PER_RUN) % len(TARGET_COMPANIES)
+    log["last_company_index"] = next_idx
 
-    # Companies not yet contacted get priority
-    priority = [c for c in TARGET_COMPANIES if c not in contacted_companies]
-    remaining_companies = [c for c in TARGET_COMPANIES if c in contacted_companies]
-    companies_to_search = priority + remaining_companies
+    logger.info(
+        f"[hr_agent] Starting HR expansion. Batch: {batch} "
+        f"(idx {last_idx}→{next_idx}). Max requests: {remaining}"
+    )
 
     requests_this_run = 0
 
-    for company in companies_to_search:
+    for company in batch:
         if requests_this_run >= remaining:
             logger.info(f"[hr_agent] Reached request limit for this run ({remaining})")
             break

@@ -73,31 +73,55 @@ def _test_session(session: requests.Session) -> bool:
         return False
 
 
+_PROFILE_DIR = "data/linkedin_browser_profile"
+
+
 def _build_playwright_context():
-    """Crea browser context autenticado para Playwright."""
+    """Crea persistent browser context autenticado para Playwright.
+
+    Usa un perfil de Chromium persistente en disco (_PROFILE_DIR) para que
+    LinkedIn vea la misma "computadora" siempre — localStorage, IndexedDB,
+    historial, cookies del navegador, etc. se conservan entre ejecuciones.
+    Las cookies de li_at/JSESSIONID se inyectan solo si no existen ya en el perfil.
+    """
+    import os
     from playwright.sync_api import sync_playwright
+
+    os.makedirs(_PROFILE_DIR, exist_ok=True)
+
     cookies = _load_cookies()
     li_at = cookies.get("li_at", "")
     jsessionid = cookies.get("JSESSIONID", "").replace('"', '')
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(
+    context = pw.chromium.launch_persistent_context(
+        user_data_dir=_PROFILE_DIR,
         headless=True,
         args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-    )
-    context = browser.new_context(
         user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport={"width": 1280, "height": 800},
     )
-    context.add_cookies([
-        {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"},
-        {"name": "JSESSIONID", "value": jsessionid, "domain": ".www.linkedin.com", "path": "/"},
-    ])
-    page = context.new_page()
-    page.add_init_script(
+    context.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
-    return pw, browser, page
+
+    # Inyectar cookies solo si no están ya en el perfil
+    existing = {c["name"] for c in context.cookies("https://www.linkedin.com")}
+    new_cookies = []
+    if "li_at" not in existing and li_at:
+        new_cookies.append({"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"})
+    if "JSESSIONID" not in existing and jsessionid:
+        new_cookies.append({"name": "JSESSIONID", "value": jsessionid, "domain": ".www.linkedin.com", "path": "/"})
+    if new_cookies:
+        context.add_cookies(new_cookies)
+        logger.debug(f"[linkedin] Inyectadas {len(new_cookies)} cookies nuevas al perfil persistente")
+
+    # Persistent context ya tiene una página por defecto, reusar o crear
+    page = context.pages[0] if context.pages else context.new_page()
+
+    # Retornamos None como browser — persistent context es browser+context en uno
+    return pw, context, page
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +409,60 @@ def get_full_conversation(conversation_id: str, sender_name: str = "") -> List[D
 
 
 # ---------------------------------------------------------------------------
-# 3. Send message via Playwright (direct URL navigation, fresh browser)
+# 3a. Send message via HTTP REST API (no browser needed)
+# ---------------------------------------------------------------------------
+
+def _send_message_http(conversation_id: str, text: str) -> bool:
+    """Envía mensaje via REST API sin Playwright.
+
+    Usa el mismo endpoint que linkedin_api: POST /messaging/conversations/{id}/events
+    """
+    import uuid
+
+    session = _build_session()
+    if not _test_session(session):
+        logger.debug("[http_send] Sesión inválida, no se puede enviar por HTTP")
+        return False
+
+    session.headers["Content-Type"] = "application/json"
+
+    # Extraer URN del conversation_id (formato: 2-BASE64== → necesitamos solo el ID)
+    # linkedin_api usa conversation_urn_id que es el mismo formato
+    payload = {
+        "eventCreate": {
+            "originToken": str(uuid.uuid4()),
+            "value": {
+                "com.linkedin.voyager.messaging.create.MessageCreate": {
+                    "attributedBody": {
+                        "text": text,
+                        "attributes": [],
+                    },
+                    "attachments": [],
+                }
+            },
+        },
+        "dedupeByClientGeneratedToken": False,
+    }
+
+    url = (
+        f"https://www.linkedin.com/voyager/api/messaging/conversations/"
+        f"{quote(conversation_id, safe='')}/events"
+    )
+    try:
+        resp = session.post(url, json=payload, params={"action": "create"}, timeout=15)
+        if resp.status_code == 201:
+            logger.success(f"[http_send] Mensaje enviado via HTTP API a {conversation_id[:20]}")
+            return True
+        else:
+            logger.warning(f"[http_send] HTTP {resp.status_code}: {resp.text[:200]}")
+            return False
+    except Exception as e:
+        logger.debug(f"[http_send] Error: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# 3b. Send message via Playwright (fallback, direct URL navigation)
 # ---------------------------------------------------------------------------
 
 def send_message(
@@ -423,6 +500,12 @@ def send_message(
         if not approved:
             logger.warning(f"[decision_agent] LinkedIn msg a {sender_name or conversation_id} RECHAZADO — {reason}")
             return False
+
+    # ── Intentar envío por HTTP REST API primero (sin Playwright) ──────────
+    if _send_message_http(conversation_id, text):
+        logger.success(f"[send] Enviado via HTTP a {sender_name or conversation_id[:20]}")
+        return True
+    logger.info("[send] HTTP falló, cayendo a Playwright...")
 
     try:
         pw, browser, page = _build_playwright_context()
@@ -519,66 +602,97 @@ def mark_conversation_read(conversation_id: str):
 # ---------------------------------------------------------------------------
 
 def refresh_cookies():
-    """Renueva cookies de LinkedIn via login directo con Playwright."""
+    """Renueva cookies de LinkedIn via login directo con contexto limpio.
+
+    Usa un browser efímero (sin persistent profile) para el login — evita
+    el redirect loop que ocurre cuando el perfil persistente tiene estado corrupto.
+    Después de obtener cookies frescas, las inyecta también al perfil persistente.
+    """
+    import os
+    from playwright.sync_api import sync_playwright
+
     email = settings.linkedin_email
     password = settings.linkedin_password
     if not email or not password:
-        logger.warning("No hay credenciales LinkedIn para refresh")
+        logger.warning("No hay credenciales LinkedIn (LINKEDIN_EMAIL/PASSWORD en .env)")
         return False
 
     try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-            )
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
-            page.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-            page.goto("https://www.linkedin.com/login")
+        pw = sync_playwright().start()
+        # Contexto efímero — sin estado previo que pueda corromper el login
+        # headless=False para evitar detección de bot por LinkedIn en el login
+        browser = pw.chromium.launch(
+            headless=False,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled",
+                  "--window-size=1280,800"],
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+        )
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        page = context.new_page()
+
+        logger.info("[refresh] Haciendo login en LinkedIn (ventana visible)...")
+        page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
+        page.fill("#username", email)
+        time.sleep(0.5)
+        page.fill("#password", password)
+        time.sleep(1)
+        page.click("button[type='submit']")
+
+        try:
+            page.wait_for_url("**/feed**", timeout=30000)
             time.sleep(2)
-            page.fill("#username", email)
-            page.fill("#password", password)
-            time.sleep(1)
-            page.click("button[type='submit']")
-
-            try:
-                page.wait_for_url("**/feed**", timeout=30000)
-            except Exception:
-                if "challenge" in page.url:
-                    logger.warning("LinkedIn CHALLENGE — cookies no renovadas")
-                    browser.close()
-                    return False
-
-            cookies = context.cookies()
-            cd = {
-                c["name"]: c["value"]
-                for c in cookies
-                if "linkedin" in c.get("domain", "")
-            }
-
-            li_at = cd.get("li_at", "")
-            jsessionid = cd.get("JSESSIONID", "").strip('"')
-
-            if li_at and jsessionid:
-                with open(settings.linkedin_cookies_file, "w") as f:
-                    json.dump({
-                        "li_at": li_at,
-                        "JSESSIONID": jsessionid,
-                        "li_rm": cd.get("li_rm", ""),
-                    }, f, indent=2)
-                logger.success("Cookies LinkedIn renovadas")
+        except Exception:
+            current = page.url
+            if "challenge" in current or "checkpoint" in current:
+                logger.warning(f"[refresh] LinkedIn CHALLENGE en {current} — se requiere verificación manual")
+                page.screenshot(path="data/screenshots/linkedin_challenge.png")
                 browser.close()
-                return True
-
+                pw.stop()
+                return False
+            logger.warning(f"[refresh] URL inesperada post-login: {current}")
             browser.close()
+            pw.stop()
             return False
+
+        # Extraer cookies frescas
+        all_cookies = context.cookies("https://www.linkedin.com")
+        cd = {c["name"]: c["value"] for c in all_cookies}
+        li_at = cd.get("li_at", "")
+        jsessionid = cd.get("JSESSIONID", "").strip('"')
+
+        if not li_at or not jsessionid:
+            logger.error("[refresh] Login exitoso pero no se encontraron cookies li_at/JSESSIONID")
+            browser.close()
+            pw.stop()
+            return False
+
+        # Guardar en archivo
+        with open(settings.linkedin_cookies_file, "w") as f:
+            json.dump({
+                "li_at": li_at,
+                "JSESSIONID": jsessionid,
+                "li_rm": cd.get("li_rm", ""),
+            }, f, indent=2)
+        logger.success("[refresh] Cookies LinkedIn renovadas y guardadas")
+
+        browser.close()
+        pw.stop()
+
+        # Limpiar el perfil persistente para que tome las cookies frescas
+        import shutil
+        if os.path.exists(_PROFILE_DIR):
+            shutil.rmtree(_PROFILE_DIR)
+            logger.info("[refresh] Perfil persistente limpiado — se recreará con cookies frescas")
+
+        return True
+
     except Exception as e:
-        logger.error(f"Error renovando cookies: {e}")
+        logger.error(f"[refresh] Error renovando cookies: {e}")
         return False
