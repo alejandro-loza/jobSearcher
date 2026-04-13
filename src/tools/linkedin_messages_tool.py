@@ -106,16 +106,15 @@ def _build_playwright_context():
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
 
-    # Inyectar cookies solo si no están ya en el perfil
-    existing = {c["name"] for c in context.cookies("https://www.linkedin.com")}
+    # Siempre inyectar cookies frescas del archivo (sobrescribir si ya existen en el perfil)
     new_cookies = []
-    if "li_at" not in existing and li_at:
+    if li_at:
         new_cookies.append({"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"})
-    if "JSESSIONID" not in existing and jsessionid:
-        new_cookies.append({"name": "JSESSIONID", "value": jsessionid, "domain": ".www.linkedin.com", "path": "/"})
+    if jsessionid:
+        new_cookies.append({"name": "JSESSIONID", "value": f'"{jsessionid}"', "domain": ".www.linkedin.com", "path": "/"})
     if new_cookies:
         context.add_cookies(new_cookies)
-        logger.debug(f"[linkedin] Inyectadas {len(new_cookies)} cookies nuevas al perfil persistente")
+        logger.debug(f"[linkedin] Inyectadas {len(new_cookies)} cookies frescas al perfil persistente")
 
     # Persistent context ya tiene una página por defecto, reusar o crear
     page = context.pages[0] if context.pages else context.new_page()

@@ -12,6 +12,7 @@ Flujo:
 import asyncio
 import base64
 import json
+import random
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -28,6 +29,20 @@ SCREENSHOTS_DIR = Path("data/screenshots")
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_STEPS = 15  # Máximo de pasos por aplicación
+
+
+async def _jitter(base_ms: int, spread_pct: float = 0.4) -> None:
+    """Wait base_ms ± spread_pct as a random human-like delay."""
+    lo = int(base_ms * (1 - spread_pct))
+    hi = int(base_ms * (1 + spread_pct))
+    await asyncio.sleep(random.randint(lo, hi) / 1000)
+
+
+def _jitter_sync(base_s: float, spread_pct: float = 0.4) -> None:
+    """Sync version of _jitter."""
+    lo = base_s * (1 - spread_pct)
+    hi = base_s * (1 + spread_pct)
+    time.sleep(random.uniform(lo, hi))
 
 
 async def _linkedin_upload_resume(page: Page, abs_cv: Path, already_uploaded: bool) -> bool:
@@ -131,7 +146,7 @@ async def _linkedin_easy_apply(
                 await btn.click()
                 easy_apply_clicked = True
                 logger.info(f"LinkedIn Easy Apply: clicked via {sel}")
-                await page.wait_for_timeout(2000)
+                await _jitter(2000)
                 break
         except Exception:
             continue
@@ -144,11 +159,12 @@ async def _linkedin_easy_apply(
         return {"success": False, "status": "error", "message": "Could not find Easy Apply button"}
 
     # Step 2: Navigate through modal steps
-    max_modal_steps = 15
+    max_modal_steps = 30
     cv_uploaded = False
+    prev_modal_texts = []  # Track last N modal texts to detect stuck loops
 
     for modal_step in range(max_modal_steps):
-        await page.wait_for_timeout(1500)
+        await _jitter(1500)
 
         # Get modal text to understand current step
         modal_text = ""
@@ -159,7 +175,46 @@ async def _linkedin_easy_apply(
         except Exception:
             modal_text = (await page.evaluate("() => document.body.innerText"))[:2000].lower()
 
-        logger.info(f"LinkedIn Easy Apply step {modal_step + 1}, modal text: {modal_text[:100]}...")
+        logger.info(f"LinkedIn Easy Apply step {modal_step + 1}, modal text: {modal_text[:120]}...")
+
+        # Detect stuck loop: same content 3 times in a row
+        prev_modal_texts.append(modal_text[:300])
+        if len(prev_modal_texts) >= 4:
+            prev_modal_texts = prev_modal_texts[-4:]
+            if all(t == prev_modal_texts[-1] for t in prev_modal_texts):
+                # Stuck — try to find and fill any error fields
+                logger.warning(f"LinkedIn Easy Apply: stuck on same step for 4 iterations, trying error recovery")
+                try:
+                    # Log all visible error messages
+                    errors = page.locator('[role="dialog"] [aria-live="polite"], [role="dialog"] .artdeco-inline-feedback--error')
+                    err_count = await errors.count()
+                    for ei in range(min(err_count, 5)):
+                        err_txt = await errors.nth(ei).inner_text()
+                        logger.warning(f"LinkedIn Easy Apply error field: {err_txt[:100]}")
+                    # Try filling error fields using LLM
+                    await _linkedin_fill_with_llm(page, resume, cover_letter, modal_text)
+                    # Force click any visible primary button
+                    for force_sel in [
+                        'button[aria-label="Continue to next step"]',
+                        'button:has-text("Siguiente")',
+                        'button:has-text("Next")',
+                        'button:has-text("Review")',
+                        'button:has-text("Revisar")',
+                        '.artdeco-modal button.artdeco-button--primary',
+                    ]:
+                        try:
+                            b = page.locator(force_sel).first
+                            if await b.is_visible(timeout=1000) and await b.is_enabled(timeout=500):
+                                await b.click()
+                                logger.info(f"LinkedIn Easy Apply: force-clicked {force_sel}")
+                                await page.wait_for_timeout(2000)
+                                prev_modal_texts = []  # reset stuck detection
+                                break
+                        except Exception:
+                            continue
+                except Exception as stuck_e:
+                    logger.warning(f"LinkedIn Easy Apply: stuck recovery failed: {stuck_e}")
+                    break  # Give up — too many retries
 
         # Check if we've completed (success page)
         if any(w in modal_text for w in [
@@ -175,13 +230,40 @@ async def _linkedin_easy_apply(
                 logger.info(f"LinkedIn Easy Apply: CV uploaded at step {modal_step + 1}")
 
         # Also try upload on any step (LinkedIn might have file input)
+        # Only upload to resume/CV file inputs, NOT photo/image inputs
         if not cv_uploaded:
             try:
                 file_inputs = page.locator('input[type="file"]')
-                if await file_inputs.count() > 0 and abs_cv.exists():
-                    await file_inputs.first.set_input_files(str(abs_cv))
-                    cv_uploaded = True
-                    logger.info(f"LinkedIn Easy Apply: CV uploaded via file input at step {modal_step + 1}")
+                fi_count = await file_inputs.count()
+                for fi_idx in range(min(fi_count, 5)):
+                    fi = file_inputs.nth(fi_idx)
+                    # Use accept attribute: photo fields accept image types, resume fields accept .pdf/.doc
+                    fi_accept = await fi.get_attribute("accept") or ""
+                    fi_accept_lower = fi_accept.lower()
+                    image_types = [".jpg", ".jpeg", ".png", ".gif", "image/"]
+                    if any(img in fi_accept_lower for img in image_types):
+                        logger.debug(f"LinkedIn Easy Apply: skipping image file input (accept='{fi_accept[:40]}')")
+                        continue
+                    # Also check label as secondary safety
+                    fi_label = await fi.evaluate("""el => {
+                        let ctx = el.closest('div');
+                        for (let i = 0; i < 5; i++) {
+                            if (!ctx) break;
+                            const lbl = ctx.querySelector('label,h3,legend,span.label');
+                            if (lbl) return lbl.innerText.toLowerCase();
+                            ctx = ctx.parentElement;
+                        }
+                        return '';
+                    }""")
+                    photo_keywords = ["photo", "foto", "profile picture", "avatar"]
+                    if any(kw in fi_label for kw in photo_keywords):
+                        logger.debug(f"LinkedIn Easy Apply: skipping photo file input (label: '{fi_label[:40]}')")
+                        continue
+                    if abs_cv.exists():
+                        await fi.set_input_files(str(abs_cv))
+                        cv_uploaded = True
+                        logger.info(f"LinkedIn Easy Apply: CV uploaded via file input at step {modal_step + 1}")
+                        break
             except Exception:
                 pass
 
@@ -275,26 +357,63 @@ async def _linkedin_fill_modal_fields(
     modal_text: str,
 ) -> None:
     """Fill common LinkedIn Easy Apply modal fields without LLM."""
+    p = resume.get("personal", resume)  # support nested or flat resume format
+    phone = p.get("phone", resume.get("phone", "+52 56 4144 6948"))
+    email = p.get("email", resume.get("email", "alejandrohloza@gmail.com"))
+    name = p.get("name", resume.get("full_name", "Alejandro Hernandez Loza"))
     field_map = {
-        "phone": resume.get("phone", "+52 56 4144 6948"),
-        "mobile": resume.get("phone", "+52 56 4144 6948"),
-        "teléfono": resume.get("phone", "+52 56 4144 6948"),
-        "city": "Ciudad de México",
-        "ciudad": "Ciudad de México",
+        "phone": phone,
+        "mobile": phone,
+        "teléfono": phone,
+        "telefono": phone,
+        "número de teléfono": phone,
+        "city": "Mexico City",
+        "ciudad": "Mexico City",
+        "location": "Mexico City",
+        "ubicación": "Mexico City",
+        "ubicacion": "Mexico City",
+        "email": email,
+        "correo": email,
+        "first name": "Alejandro",
+        "primer nombre": "Alejandro",
+        "last name": "Hernandez Loza",
+        "apellido": "Hernandez Loza",
+        "headline": "Sr. Software Engineer | Java | Spring Boot | Cloud | 10+ Years",
+        "título": "Sr. Software Engineer | Java | Spring Boot | Cloud | 10+ Years",
+        "titulo": "Sr. Software Engineer | Java | Spring Boot | Cloud | 10+ Years",
+        "job title": "Sr. Software Engineer",
+        "puesto": "Sr. Software Engineer",
+        "current title": "Sr. Software Engineer",
+        "position": "Sr. Software Engineer",
     }
+    location_value = "Mexico City"
+
+    # Scope inputs to the modal to avoid hitting global LinkedIn search bar
+    modal_sel = page.locator('.artdeco-modal, .jobs-easy-apply-modal, [role="dialog"]').first
+    try:
+        modal_visible = await modal_sel.is_visible(timeout=1000)
+        input_parent = modal_sel if modal_visible else page
+    except Exception:
+        input_parent = page
 
     # Fill text inputs by label matching
-    inputs = page.locator('input[type="text"], input:not([type])')
+    inputs = input_parent.locator('input[type="text"], input[type="search"], input:not([type]):not([type="file"]):not([type="checkbox"]):not([type="radio"])')
     count = await inputs.count()
-    for i in range(min(count, 15)):
+    for i in range(min(count, 20)):
         try:
             inp = inputs.nth(i)
             if not await inp.is_visible(timeout=500):
                 continue
-            # Get the associated label or placeholder
+            # Get the associated label or placeholder (walk up DOM)
             label = await inp.evaluate("""el => {
-                let label = el.closest('div')?.querySelector('label')?.innerText || '';
-                return label || el.placeholder || el.getAttribute('aria-label') || '';
+                let ctx = el;
+                for (let i = 0; i < 6; i++) {
+                    ctx = ctx.parentElement;
+                    if (!ctx) break;
+                    const lbl = ctx.querySelector('label');
+                    if (lbl) return lbl.innerText;
+                }
+                return el.placeholder || el.getAttribute('aria-label') || el.getAttribute('name') || '';
             }""")
             label_lower = label.lower().strip()
 
@@ -307,10 +426,37 @@ async def _linkedin_fill_modal_fields(
             filled = False
             for key, val in field_map.items():
                 if key in label_lower:
-                    await inp.fill(val)
-                    logger.debug(f"LinkedIn auto-fill: '{label}' = '{val}'")
-                    filled = True
-                    break
+                    # Location/city fields use autocomplete — type then pick suggestion
+                    if any(loc in label_lower for loc in ["city", "ciudad", "location", "ubicación", "ubicacion"]):
+                        await inp.click()
+                        await inp.fill("")
+                        await page.keyboard.type(location_value, delay=80)
+                        await page.wait_for_timeout(1800)
+                        # Try to pick first autocomplete suggestion
+                        suggestion = page.locator(
+                            '[role="option"]:visible, [role="listbox"] li:visible, '
+                            '.search-typeahead-v2__hit:visible, .basic-typeahead__selectable:visible'
+                        ).first
+                        try:
+                            if await suggestion.is_visible(timeout=2000):
+                                await suggestion.click()
+                                await page.wait_for_timeout(500)
+                                logger.debug(f"LinkedIn auto-fill: '{label}' → picked autocomplete for '{location_value}'")
+                                filled = True
+                                break
+                        except Exception:
+                            pass
+                        # Dropdown didn't appear — try pressing Enter to accept
+                        await page.keyboard.press("Enter")
+                        await page.wait_for_timeout(300)
+                        logger.debug(f"LinkedIn auto-fill: '{label}' typed '{location_value}' + Enter (no dropdown)")
+                        filled = True
+                        break
+                    else:
+                        await inp.fill(val)
+                        logger.debug(f"LinkedIn auto-fill: '{label}' = '{val}'")
+                        filled = True
+                        break
 
             # Years of experience
             if not filled and any(w in label_lower for w in ["years", "años", "experience"]):
@@ -338,7 +484,7 @@ async def _linkedin_fill_modal_fields(
             continue
 
     # Fill textareas (cover letter, additional info)
-    textareas = page.locator('textarea')
+    textareas = input_parent.locator('textarea')
     ta_count = await textareas.count()
     for i in range(min(ta_count, 5)):
         try:
@@ -363,7 +509,7 @@ async def _linkedin_fill_modal_fields(
             continue
 
     # Handle select/dropdown fields
-    selects = page.locator('select')
+    selects = input_parent.locator('select')
     sel_count = await selects.count()
     for i in range(min(sel_count, 10)):
         try:
@@ -688,17 +834,40 @@ async def _execute_action(page: Page, action: Dict) -> bool:
     try:
         if action_type == "fill":
             # Intentar múltiples estrategias de selector
-            for strategy in [
+            strategies = [
+                selector,  # selector exacto del LLM (e.g. input[placeholder='First Name'])
+                f'[placeholder="{selector}"]',
                 f'[placeholder*="{selector}"]',
                 f'[name*="{selector}"]',
                 f'[id*="{selector}"]',
                 f'[aria-label*="{selector}"]',
-                f'input[type="text"]',
-            ]:
+            ]
+            for strategy in strategies:
                 try:
-                    await page.fill(strategy, value, timeout=3000)
-                    logger.debug(f"Fill '{selector}' = '{value}' via {strategy}")
-                    return True
+                    elem = page.locator(strategy).first
+                    if not await elem.is_visible(timeout=2000):
+                        continue
+                    # Primero intentar fill normal
+                    try:
+                        await elem.fill(value, timeout=3000)
+                        logger.debug(f"Fill '{selector}' = '{value}' via {strategy}")
+                        return True
+                    except Exception:
+                        # Para inputs React/custom: click → triple-click (select all) → type
+                        try:
+                            await elem.click(timeout=2000)
+                            await elem.triple_click(timeout=1000)
+                            await page.keyboard.type(value, delay=30)
+                            # Disparar eventos de React
+                            await elem.evaluate("""el => {
+                                ['input', 'change', 'blur'].forEach(evt =>
+                                    el.dispatchEvent(new Event(evt, {bubbles: true}))
+                                );
+                            }""")
+                            logger.debug(f"Fill (React) '{selector}' = '{value}' via {strategy}")
+                            return True
+                        except Exception:
+                            continue
                 except Exception:
                     continue
 
@@ -816,6 +985,22 @@ async def apply_to_job_url(
     """
     logger.info(f"Browser agent iniciando aplicación: {job_title} @ {company} → {job_url}")
 
+    # Detectar URLs genéricas de carreras (no página de aplicación específica)
+    import re as _re
+    _generic_careers_patterns = [
+        r'/(careers|jobs|work-with-us|join-us|open-positions|empleo|vacantes)/?$',
+        r'/(careers|jobs)/(home|overview|culture|benefits|teams)/?$',
+    ]
+    _is_generic = any(_re.search(p, job_url, _re.IGNORECASE) for p in _generic_careers_patterns)
+    if _is_generic and "linkedin.com" not in job_url:
+        logger.warning(f"URL genérica de carreras detectada, no es una página de aplicación específica: {job_url}")
+        return {
+            "success": False,
+            "status": "generic_url",
+            "message": f"URL genérica de carreras — requiere navegación manual para encontrar el job específico: {job_url}",
+            "url": job_url,
+        }
+
     from src.tools import whatsapp_tool
 
     _PROFILE_DIR = "data/linkedin_browser_profile"
@@ -823,56 +1008,83 @@ async def apply_to_job_url(
     async with async_playwright() as p:
         is_linkedin = "linkedin.com" in job_url
 
+        # Cargar cookies de LinkedIn si aplica
+        li_at_val, jsessionid_val = "", ""
         if is_linkedin:
-            import os
-            os.makedirs(_PROFILE_DIR, exist_ok=True)
-            context: BrowserContext = await p.chromium.launch_persistent_context(
-                user_data_dir=_PROFILE_DIR,
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox",
-                      "--disable-blink-features=AutomationControlled"],
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-            )
-            # Inyectar cookies solo si no están en el perfil
-            existing = {c["name"] for c in await context.cookies("https://www.linkedin.com")}
-            if "li_at" not in existing:
-                try:
-                    import json as _json
-                    with open(settings.linkedin_cookies_file) as f:
-                        linkedin_cookies = _json.load(f)
-                    cookies = []
-                    if isinstance(linkedin_cookies, dict):
-                        for name, value in linkedin_cookies.items():
-                            cookies.append({"name": name, "value": value, "domain": ".linkedin.com", "path": "/"})
-                    elif isinstance(linkedin_cookies, list):
-                        cookies = linkedin_cookies
-                    await context.add_cookies(cookies)
-                    logger.debug("Cookies de LinkedIn inyectadas al perfil persistente")
-                except Exception as e:
-                    logger.warning(f"No se pudieron cargar cookies de LinkedIn: {e}")
-            browser = None  # persistent context = browser + context
-        else:
-            browser: Browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"],
-            )
-            context: BrowserContext = await browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
-            )
+            try:
+                import json as _json
+                with open(settings.linkedin_cookies_file) as f:
+                    _lc = _json.load(f)
+                li_at_val = _lc.get("li_at", "") if isinstance(_lc, dict) else ""
+                jsessionid_val = _lc.get("JSESSIONID", "").replace('"', '') if isinstance(_lc, dict) else ""
+            except Exception as e:
+                logger.warning(f"No se pudieron cargar cookies de LinkedIn: {e}")
+
+        # Usar contexto regular (NO persistente) para todos los casos.
+        # El contexto persistente causa ERR_TOO_MANY_REDIRECTS cuando el perfil está vacío.
+        browser: Browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-blink-features=AutomationControlled"],
+        )
+        context: BrowserContext = await browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
 
         page: Page = context.pages[0] if context.pages else await context.new_page()
+        # Anti-bot fingerprint: hide automation signals
+        await context.add_init_script("""
+            // Hide webdriver flag
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            // Fake plugins array (Chrome has plugins, headless has none)
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            // Fake languages
+            Object.defineProperty(navigator, 'languages', {get: () => ['es-MX', 'es', 'en-US', 'en']});
+            // Override chrome runtime
+            window.chrome = {runtime: {}};
+            // Disable automation feature detection
+            delete window.__playwright;
+            delete window.__pwInitScripts;
+        """)
 
         try:
-            await page.goto(job_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2000)
+            # Para LinkedIn: navegar primero a linkedin.com (sin cookies) para establecer
+            # el dominio, luego inyectar cookies, luego ir al job URL.
+            # Esta secuencia evita ERR_TOO_MANY_REDIRECTS.
+            if is_linkedin:
+                # Paso 1: linkedin.com sin cookies (establece el dominio)
+                await page.goto("https://www.linkedin.com/", wait_until="domcontentloaded", timeout=15000)
+                if li_at_val:
+                    await context.add_cookies([
+                        {"name": "li_at", "value": li_at_val, "domain": ".linkedin.com", "path": "/"},
+                        {"name": "JSESSIONID", "value": f'"{jsessionid_val}"', "domain": ".www.linkedin.com", "path": "/"},
+                    ])
+                    logger.debug("Cookies de LinkedIn inyectadas después de establecer dominio")
+                # Paso 2: ir al feed/ para activar la sesión autenticada
+                await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
+                await _jitter(2000)
+                feed_url = page.url
+                if "login" in feed_url or "authwall" in feed_url or "checkpoint" in feed_url:
+                    logger.error(f"LinkedIn: no autenticado después de inyectar cookies — URL: {feed_url}")
+                    return {"success": False, "status": "auth_failed", "message": "LinkedIn cookie expirada o inválida"}
+                logger.info(f"LinkedIn: sesión autenticada establecida (feed: {feed_url})")
+                # Paso 3: navegar al job URL vía JavaScript (más natural, evita bloqueo de bot)
+                await page.evaluate(f'window.location.href = "{job_url}"')
+                await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                await _jitter(2000)
+                logger.info(f"LinkedIn: navegado a job URL via JS — {page.url}")
+                # Sobrescribir job_url para que el bloque siguiente no lo renavegue
+                job_url = page.url
+
+            # Para LinkedIn: ya navegamos al job_url vía JS desde el feed (arriba).
+            # Para otros sitios: navegar directamente.
+            if not is_linkedin:
+                await page.goto(job_url, wait_until="domcontentloaded", timeout=60000)
+                await _jitter(2000)
 
             history = []
             final_status = "error"
@@ -894,13 +1106,33 @@ async def apply_to_job_url(
                 logger.error(f"[antispam] CV no aprobado bloqueado en LinkedIn apply: {cv_check.reason}")
                 return {"success": False, "status": "blocked_cv", "message": cv_check.reason}
 
-            # Resolver ruta absoluta del CV
+            # Resolver ruta absoluta del CV (relativa al directorio del proyecto)
             from pathlib import Path as _Path
-            abs_cv = _Path(cv_pdf_path).resolve() if cv_pdf_path.startswith("/") else (_Path("/data/projects/proyects/jobSearcher") / cv_pdf_path).resolve()
+            _project_root = _Path(__file__).parent.parent.parent  # src/tools/browser_tool.py → raíz
+            abs_cv = _Path(cv_pdf_path).resolve() if _Path(cv_pdf_path).is_absolute() else (_project_root / cv_pdf_path).resolve()
             cv_uploaded = False
 
-            # LinkedIn Easy Apply: use dedicated handler
+            # LinkedIn Easy Apply: intentar primero via Voyager API (sin browser)
             if "linkedin.com" in job_url:
+                try:
+                    from src.tools.linkedin_easy_apply_api import submit_easy_apply
+                    api_result = await asyncio.to_thread(submit_easy_apply, job_url, resume, cover_letter)
+                    logger.info(f"[li_api] Resultado API: {api_result.get('status')} — {api_result.get('message','')[:80]}")
+                    if api_result.get("success") or api_result.get("status") == "already_applied":
+                        return {
+                            "success": api_result.get("success", False),
+                            "status": api_result.get("status", "success"),
+                            "message": api_result.get("message", ""),
+                            "url": job_url,
+                        }
+                    # Si la API falla por auth, no tiene caso intentar el browser
+                    if api_result.get("status") == "auth_failed":
+                        return api_result
+                    # Para otros errores, caer al handler de browser
+                    logger.warning(f"[li_api] API falló ({api_result.get('status')}), intentando browser...")
+                except Exception as api_e:
+                    logger.warning(f"[li_api] Error en API, intentando browser: {api_e}")
+
                 result = await _linkedin_easy_apply(page, resume, abs_cv, cover_letter)
                 if result.get("success") or result.get("status") == "done":
                     return {

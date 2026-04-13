@@ -116,6 +116,180 @@ async def job_search_task():
         whatsapp_tool.send_message(f"Error en búsqueda automática: {e}")
 
 
+async def search_and_apply_task():
+    """
+    Tarea principal: busca nuevos jobs cada hora y aplica automáticamente
+    a los que tengan score >= threshold sin esperar aprobación manual.
+
+    Flujo:
+      1. Buscar con múltiples términos en LinkedIn/Indeed/Glassdoor
+      2. Evaluar match vs resume (Groq)
+      3. Si score >= 75: generar cover letter (GLM) + aplicar
+         - Easy Apply LinkedIn → browser_tool
+         - Portal externo → browser_tool
+         - Sin URL → guardar como pending_manual
+      4. Log en DB + notificar resumen por WhatsApp
+    """
+    logger.info("[search_apply] ===== CICLO BÚSQUEDA + APLICACIÓN =====")
+
+    SEARCH_TERMS = [
+        "Senior Java Developer remote",
+        "Java Spring Boot Engineer remote",
+        "Senior Backend Engineer Java",
+        "Senior Software Engineer Java microservices",
+        "Lead Java Developer remote",
+        "Senior Full Stack Java remote",
+        "Java Cloud Engineer AWS GCP remote",
+        "Staff Software Engineer Java",
+    ]
+    LOCATIONS = ["remote", "Mexico City"]
+    HOURS_OLD = 24        # solo jobs de las últimas 24h
+    RESULTS_PER_TERM = 10
+    THRESHOLD = settings.job_match_threshold  # 75
+
+    resume = _load_resume()
+    if not resume:
+        logger.error("[search_apply] Sin resume.json — abortando")
+        return
+
+    found_total = 0
+    matched = 0
+    applied_ok = 0
+    applied_fail = 0
+
+    for term in SEARCH_TERMS:
+        for location in LOCATIONS:
+            try:
+                jobs = await asyncio.to_thread(
+                    jobspy_tool.search_jobs,
+                    term, location, RESULTS_PER_TERM, HOURS_OLD,
+                )
+            except Exception as e:
+                logger.warning(f"[search_apply] Search failed '{term}': {e}")
+                continue
+
+            for job in jobs:
+                job_id = job.get("id", "")
+                if not job_id or tracker.job_exists(job_id):
+                    continue
+
+                if not _is_valid_location(job.get("location", "")):
+                    continue
+
+                found_total += 1
+
+                # Evaluar match
+                try:
+                    score, reason = await asyncio.to_thread(
+                        master_agent.evaluate_job_match, job, resume
+                    )
+                except Exception as e:
+                    logger.warning(f"[search_apply] Score failed for {job.get('title')}: {e}")
+                    score, reason = 0, ""
+
+                job["match_score"] = score
+                tracker.save_job(job)
+
+                if score < THRESHOLD:
+                    logger.debug(f"[search_apply] Skip ({score}%): {job['title']} @ {job['company']}")
+                    continue
+
+                matched += 1
+                logger.info(f"[search_apply] MATCH {score}%: {job['title']} @ {job['company']}")
+
+                # Generar cover letter
+                try:
+                    cover_letter = await asyncio.to_thread(
+                        master_agent.generate_cover_letter, job, resume
+                    )
+                except Exception:
+                    cover_letter = (
+                        f"Hi, I'm Alejandro Hernandez Loza, a Senior Software Engineer "
+                        f"with 12+ years in Java, Spring Boot and Cloud. "
+                        f"I'm very interested in the {job.get('title','')} role at {job.get('company','')}."
+                    )
+
+                # Aplicar
+                job_url = job.get("url", "")
+                method = "pending_manual"
+                success = False
+
+                if job_url and job_url != "nan":
+                    try:
+                        result = await asyncio.to_thread(
+                            browser_tool.apply_to_job_sync,
+                            job_url, resume, job["title"], job["company"], cover_letter
+                        )
+                        success = result.get("success", False)
+                        status_detail = result.get("status", "unknown")
+                        if success:
+                            method = "browser_agent"
+                            applied_ok += 1
+                            logger.success(f"[search_apply] APLICADO: {job['title']} @ {job['company']}")
+                        elif status_detail == "captcha":
+                            method = "blocked_captcha"
+                            applied_fail += 1
+                            logger.warning(f"[search_apply] CAPTCHA: {job['title']}")
+                        elif status_detail == "generic_url":
+                            # URL genérica de carreras → agregar a pending para revisión manual
+                            method = "pending_manual"
+                            applied_fail += 1
+                            import json as _json
+                            import os as _os
+                            _pending_file = "data/pending_browser_tasks.json"
+                            try:
+                                _tasks = _json.load(open(_pending_file)) if _os.path.exists(_pending_file) else []
+                                _tasks.append({
+                                    "type": "apply",
+                                    "url": job_url,
+                                    "contact_name": "",
+                                    "context": f"Aplicar a {job['title']} @ {job['company']} — URL genérica de carreras, encontrar el job específico manualmente",
+                                    "suggested_message": cover_letter[:500] if cover_letter else "",
+                                    "created_at": datetime.now().isoformat(),
+                                    "status": "pending",
+                                    "job_title": job["title"],
+                                    "company": job["company"],
+                                    "score": score,
+                                })
+                                with open(_pending_file, "w") as f:
+                                    _json.dump(_tasks, f, indent=2, ensure_ascii=False)
+                            except Exception as _pe:
+                                logger.warning(f"No se pudo guardar en pending_browser_tasks: {_pe}")
+                            logger.info(f"[search_apply] URL genérica: {job['title']} — guardado en pending_browser_tasks.json")
+                        else:
+                            method = f"browser_failed:{status_detail}"
+                            applied_fail += 1
+                            logger.warning(f"[search_apply] FALLO ({status_detail}): {job['title']}")
+                    except Exception as be:
+                        method = "browser_error"
+                        applied_fail += 1
+                        logger.warning(f"[search_apply] Browser error: {be}")
+                else:
+                    method = "pending_manual"
+                    applied_fail += 1
+                    logger.info(f"[search_apply] Sin URL: {job['title']} — guardado como pending_manual")
+
+                app_status = "applied" if success else ("apply_failed" if "failed" in method or "error" in method else "pending_apply")
+                tracker.save_application(job_id=job_id, method=method, cover_letter=cover_letter, status=app_status)
+
+                await asyncio.sleep(5)  # pausa entre aplicaciones
+
+    summary = (
+        f"[search_apply] Ciclo completo — "
+        f"encontrados: {found_total} | matches: {matched} | "
+        f"aplicados: {applied_ok} | fallidos: {applied_fail}"
+    )
+    logger.success(summary)
+
+    if matched > 0:
+        whatsapp_tool.send_message(
+            f"Ciclo de búsqueda completado:\n"
+            f"• {matched} jobs con match >= {THRESHOLD}%\n"
+            f"• {applied_ok} aplicaciones enviadas\n"
+            f"• {applied_fail} requieren revisión manual"
+        )
+
+
 EMAIL_BLOCKLIST = {
     "padma@ptechpartners.com",
 }
@@ -656,27 +830,43 @@ async def image_inspection_task():
 
 
 async def linkedin_cookie_refresh_task():
-    """Verifica si las cookies de LinkedIn siguen válidas y notifica si no."""
+    """Verifica si las cookies de LinkedIn siguen válidas. Si no, intenta renovarlas
+    via login automático. Si el login falla (2FA), notifica a Alejandro."""
     logger.info("Verificando cookies de LinkedIn...")
     try:
         from src.tools import whatsapp_tool
-        from src.tools.linkedin_messages_tool import _build_session, _test_session
+        from src.tools.linkedin_auth import verify_session, login_and_save_cookies
 
-        session = _build_session()
-        valid = await asyncio.to_thread(_test_session, session)
+        valid = await asyncio.to_thread(verify_session)
 
         if valid:
             logger.success("Cookies de LinkedIn OK")
+            return
+
+        logger.warning("Cookies de LinkedIn EXPIRADAS — intentando renovar automáticamente...")
+
+        # Intentar login automático
+        renewed = await asyncio.to_thread(login_and_save_cookies)
+
+        if renewed:
+            logger.success("Cookies de LinkedIn renovadas automáticamente via login")
+            whatsapp_tool.send_message(
+                "✅ *LinkedIn* — sesión renovada automáticamente"
+            )
         else:
-            logger.warning("Cookies de LinkedIn EXPIRADAS — notificando a Alejandro")
+            logger.warning("Login automático falló (probablemente 2FA) — notificando a Alejandro")
             whatsapp_tool.send_message(
                 "⚠️ *LinkedIn cookies expiradas*\n\n"
-                "Las cookies de LinkedIn dejaron de funcionar.\n"
-                "Por favor actualiza `li_at` y `JSESSIONID` usando EditThisCookie en tu browser.\n\n"
-                "Ve a linkedin.com → EditThisCookie → copia li_at y JSESSIONID → pégalos aquí."
+                "No pude renovarlas automáticamente (LinkedIn pidió verificación).\n\n"
+                "Por favor ve a *linkedin.com* en tu browser, abre DevTools (F12) → "
+                "Application → Cookies → copia estos valores:\n"
+                "• `li_at`\n"
+                "• `JSESSIONID`\n"
+                "• `bcookie`\n\n"
+                "Y pégalos aquí en el chat."
             )
     except Exception as e:
-        logger.error(f"Error verificando cookies LinkedIn: {e}")
+        logger.error(f"Error verificando/renovando cookies LinkedIn: {e}")
 
 
 async def followup_task():
@@ -891,19 +1081,19 @@ async def lifespan(app: FastAPI):
 
     # ── ACTIVOS ───────────────────────────────────────────────────────────
 
-    # Búsqueda de empleos: cada 3 horas
-    scheduler.add_job(job_search_task, "interval", hours=3, id="job_search")
+    # BÚSQUEDA + APLICACIÓN AUTOMÁTICA: cada hora (tarea principal)
+    scheduler.add_job(search_and_apply_task, "interval", hours=1, id="search_and_apply")
 
-    # Búsqueda premium (score >= 82%): cada 3 horas, offset 90min vs job_search
-    scheduler.add_job(premium_job_search_task, "interval", hours=3, start_date="2026-04-02 01:30:00", id="premium_job_search")
+    # Búsqueda legacy (notifica por WhatsApp, sin auto-apply): cada 2h como backup
+    scheduler.add_job(job_search_task, "interval", hours=2, id="job_search")
+
+    # Búsqueda premium (score >= 82%): cada hora, offset 30min vs search_and_apply
+    scheduler.add_job(premium_job_search_task, "interval", hours=1, start_date="2026-04-12 00:30:00", id="premium_job_search")
 
     # LinkedIn content: 3 posts diarios L-V (8am, 1pm, 5pm)
     scheduler.add_job(linkedin_content_task, "cron", hour=8, minute=0, day_of_week="mon-fri", id="linkedin_content_morning")
     scheduler.add_job(linkedin_content_task, "cron", hour=13, minute=0, day_of_week="mon-fri", id="linkedin_content_noon")
     scheduler.add_job(linkedin_content_task, "cron", hour=17, minute=0, day_of_week="mon-fri", id="linkedin_content_evening")
-
-    # DESACTIVADO: LinkedIn bloquea búsqueda de personas desde servidor (API + Playwright)
-    # scheduler.add_job(linkedin_hr_expansion_task, "cron", hour=15, minute=0, day_of_week="mon-fri", id="linkedin_hr_expansion")
 
     # Inspección de infografías: L-V 9:30, 14:00, 18:00
     scheduler.add_job(image_inspection_task, "cron", hour="9,14,18", minute=30, day_of_week="mon-fri", id="image_inspection")
@@ -917,22 +1107,19 @@ async def lifespan(app: FastAPI):
     # ── THOMSON REUTERS STALKER DEDICADO: cada hora ────────────────────
     scheduler.add_job(thomson_reuters_stalker_task, "interval", hours=1, id="tr_stalker")
 
-    # ── STALKER JOBS: 6 grupos, cada 2h, escalonados 20min ──────────────
-    # Grupo A (TR, Globant, EPAM, Nubank, MeLi): minuto 0
-    scheduler.add_job(stalker_group_A, "interval", hours=2, start_date="2026-04-06 19:00:00", id="stalker_A")
-    # Grupo B (Uber, Stripe, Twilio, GitHub, NVIDIA): minuto 20
-    scheduler.add_job(stalker_group_B, "interval", hours=2, start_date="2026-04-06 19:20:00", id="stalker_B")
-    # Grupo C (Endava, Wizeline, Bitso, Clip, Rappi): minuto 40
-    scheduler.add_job(stalker_group_C, "interval", hours=2, start_date="2026-04-06 19:40:00", id="stalker_C")
-    # Grupo D (Capital One, Citi, DB, BlackRock, Plaid): minuto 0 +1h
-    scheduler.add_job(stalker_group_D, "interval", hours=2, start_date="2026-04-06 20:00:00", id="stalker_D")
-    # Grupo E (Samsara, Roku, Thoughtworks, Capgemini, Cognizant): minuto 20 +1h
-    scheduler.add_job(stalker_group_E, "interval", hours=2, start_date="2026-04-06 20:20:00", id="stalker_E")
-    # Grupo F (Konfio, Kueski, Conekta, Kavak, Allstate): minuto 40 +1h
-    scheduler.add_job(stalker_group_F, "interval", hours=2, start_date="2026-04-06 20:40:00", id="stalker_F")
+    # ── STALKER JOBS: 6 grupos, cada hora, escalonados 10min ────────────
+    # Cada grupo stalkea 5 empresas específicas buscando vacantes para Alejandro
+    # Escalonados para no saturar: grupo nuevo cada 10 minutos
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:00")
+    scheduler.add_job(stalker_group_A, "interval", hours=1, id="stalker_A")   # TR, Globant, EPAM, Nubank, MeLi
+    scheduler.add_job(stalker_group_B, "interval", hours=1, id="stalker_B")   # Uber, Stripe, Twilio, GitHub, NVIDIA
+    scheduler.add_job(stalker_group_C, "interval", hours=1, id="stalker_C")   # Endava, Wizeline, Bitso, Clip, Rappi
+    scheduler.add_job(stalker_group_D, "interval", hours=1, id="stalker_D")   # Citi, Deutsche Bank, BlackRock, Plaid, HSBC
+    scheduler.add_job(stalker_group_E, "interval", hours=1, id="stalker_E")   # Samsara, Roku, Thoughtworks, Capgemini, Cognizant
+    scheduler.add_job(stalker_group_F, "interval", hours=1, id="stalker_F")   # Konfio, Kueski, Conekta, Kavak, Allstate
 
     scheduler.start()
-    logger.success("Scheduler iniciado (13 tasks activas: 7 originales + 6 stalker groups)")
+    logger.success("Scheduler iniciado — búsqueda+aplicación cada hora | 6 stalkers cada hora | LinkedIn content 3x/día")
 
     whatsapp_tool.send_message(
         "Agente de búsqueda de empleo activo.\n\n"

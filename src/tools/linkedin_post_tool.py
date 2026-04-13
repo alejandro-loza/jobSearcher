@@ -45,14 +45,17 @@ def _build_playwright_context():
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         ),
     )
-    context.add_cookies([
-        {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"},
-        {"name": "JSESSIONID", "value": jsessionid, "domain": ".www.linkedin.com", "path": "/"},
-    ])
     page = context.new_page()
     page.add_init_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
+    # Navegar a linkedin.com primero (sin cookies) para establecer el dominio,
+    # luego agregar cookies y navegar al destino — evita ERR_TOO_MANY_REDIRECTS
+    page.goto("https://www.linkedin.com/", wait_until="domcontentloaded", timeout=15000)
+    context.add_cookies([
+        {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"},
+        {"name": "JSESSIONID", "value": f'"{jsessionid}"', "domain": ".www.linkedin.com", "path": "/"},
+    ])
     return pw, browser, context, page
 
 
@@ -68,11 +71,17 @@ def post_to_linkedin(text: str, image_path: Optional[str] = None) -> bool:
         pw, browser, context, page = _build_playwright_context()
 
         logger.info("[linkedin_post] Navigating to LinkedIn feed...")
-        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
+        page.goto("https://www.linkedin.com/feed/", wait_until="load", timeout=45000)
+        time.sleep(4)
 
         # Click "Start a post" / "Iniciar una publicación"
         start_post_selectors = [
+            # div-based selectors (LinkedIn 2024+ UI — "Start a post" es un div clickeable)
+            'div.share-box-feed-entry__top-bar',
+            'div[data-placeholder="Start a post, try a video or a document"]',
+            'div[data-placeholder*="Start a post"]',
+            'div.share-creation-state__placeholder',
+            # button-based selectors (UI anterior)
             'button[aria-label="Start a post"]',
             'button[aria-label="Iniciar una publicación"]',
             'button.share-box-feed-entry__trigger',
@@ -80,9 +89,9 @@ def post_to_linkedin(text: str, image_path: Optional[str] = None) -> bool:
             'div.share-box-feed-entry__top-bar button',
             'button:has-text("Start a post")',
             'button:has-text("Iniciar una publicación")',
-            'button:has-text("Iniciar una")',
-            '.share-creation-state__placeholder',
+            # placeholders genéricos
             '[placeholder="Start a post, try a video or a document"]',
+            'div:has-text("Start a post"):not(:has(div))',
         ]
 
         clicked = False
