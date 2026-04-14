@@ -24,6 +24,7 @@ from src.agents.chat_agent import chat_agent
 from src.tools import jobspy_tool, gmail_tool, calendar_tool, whatsapp_tool
 from src.tools import linkedin_messages_tool, browser_tool
 from src.agents import image_inspector_agent
+from src.agents import job_discovery_agent
 
 tracker = JobTracker()
 scheduler = AsyncIOScheduler()
@@ -118,176 +119,55 @@ async def job_search_task():
 
 async def search_and_apply_task():
     """
-    Tarea principal: busca nuevos jobs cada hora y aplica automáticamente
+    [DESACTIVADO - Reemplazado por queue_task]
+    
+    Tarea anterior: busca nuevos jobs cada hora y aplica automáticamente
     a los que tengan score >= threshold sin esperar aprobación manual.
-
-    Flujo:
-      1. Buscar con múltiples términos en LinkedIn/Indeed/Glassdoor
-      2. Evaluar match vs resume (Groq)
-      3. Si score >= 75: generar cover letter (GLM) + aplicar
-         - Easy Apply LinkedIn → browser_tool
-         - Portal externo → browser_tool
-         - Sin URL → guardar como pending_manual
-      4. Log en DB + notificar resumen por WhatsApp
+    
+    Ahora: Esta tarea está desactivada. El Job Queue Manager (queue_task)
+    es responsable de aplicar jobs con priorización global y rate limiting.
     """
-    logger.info("[search_apply] ===== CICLO BÚSQUEDA + APLICACIÓN =====")
+    logger.info("[search_apply] ===== TAREA DESACTIVADA =====")
+    logger.info("[search_apply] Usando Job Queue Manager en su lugar")
+    return {"status": "disabled", "reason": "Reemplazado por queue_task"}
 
-    SEARCH_TERMS = [
-        "Senior Java Developer remote",
-        "Java Spring Boot Engineer remote",
-        "Senior Backend Engineer Java",
-        "Senior Software Engineer Java microservices",
-        "Lead Java Developer remote",
-        "Senior Full Stack Java remote",
-        "Java Cloud Engineer AWS GCP remote",
-        "Staff Software Engineer Java",
-    ]
-    LOCATIONS = ["remote", "Mexico City"]
-    HOURS_OLD = 24        # solo jobs de las últimas 24h
-    RESULTS_PER_TERM = 10
-    THRESHOLD = settings.job_match_threshold  # 75
 
-    resume = _load_resume()
-    if not resume:
-        logger.error("[search_apply] Sin resume.json — abortando")
-        return
+async def queue_task():
+    """
+    Application Agent cycle — único ejecutor de aplicaciones.
 
-    found_total = 0
-    matched = 0
-    applied_ok = 0
-    applied_fail = 0
+    Lee cola priorizada de BD (status='found', score>=75, <14d), aplica 1 job
+    por ciclo vía linkedin_moderate_agent con delays 15-45s random.
+    Cap diario: 35 apps. Pausa fuera de 7am-9pm CDMX. Auto-recovery si detecta ban.
 
-    for term in SEARCH_TERMS:
-        for location in LOCATIONS:
-            try:
-                jobs = await asyncio.to_thread(
-                    jobspy_tool.search_jobs,
-                    term, location, RESULTS_PER_TERM, HOURS_OLD,
-                )
-            except Exception as e:
-                logger.warning(f"[search_apply] Search failed '{term}': {e}")
-                continue
+    Scheduler debe usar max_instances=1 y coalesce=True para evitar overlaps.
+    """
+    logger.info("[queue] ===== application_cycle =====")
+    try:
+        from src.agents import application_agent
 
-            for job in jobs:
-                job_id = job.get("id", "")
-                if not job_id or tracker.job_exists(job_id):
-                    continue
+        result = await application_agent.run_application_cycle()
+        logger.info(f"[queue] resultado: {result}")
 
-                if not _is_valid_location(job.get("location", "")):
-                    continue
+        # Solo notificar eventos relevantes (no cada 2min si no pasó nada)
+        if result.get("ban_detected"):
+            # El propio application_agent ya notificó el ban por WA
+            pass
+        elif result.get("applied", 0) > 0:
+            applied = result["applied"]
+            whatsapp_tool.send_message(
+                f"✅ Aplicación enviada ({applied}). "
+                f"Queue status: attempted={result['attempted']} failed={result['failed']} "
+                f"manual={result['manual_queued']}"
+            )
+        elif result.get("manual_queued", 0) > 0:
+            logger.info(f"[queue] {result['manual_queued']} job(s) escalados a manual")
 
-                found_total += 1
+        return result
 
-                # Evaluar match
-                try:
-                    score, reason = await asyncio.to_thread(
-                        master_agent.evaluate_job_match, job, resume
-                    )
-                except Exception as e:
-                    logger.warning(f"[search_apply] Score failed for {job.get('title')}: {e}")
-                    score, reason = 0, ""
-
-                job["match_score"] = score
-                tracker.save_job(job)
-
-                if score < THRESHOLD:
-                    logger.debug(f"[search_apply] Skip ({score}%): {job['title']} @ {job['company']}")
-                    continue
-
-                matched += 1
-                logger.info(f"[search_apply] MATCH {score}%: {job['title']} @ {job['company']}")
-
-                # Generar cover letter
-                try:
-                    cover_letter = await asyncio.to_thread(
-                        master_agent.generate_cover_letter, job, resume
-                    )
-                except Exception:
-                    cover_letter = (
-                        f"Hi, I'm Alejandro Hernandez Loza, a Senior Software Engineer "
-                        f"with 12+ years in Java, Spring Boot and Cloud. "
-                        f"I'm very interested in the {job.get('title','')} role at {job.get('company','')}."
-                    )
-
-                # Aplicar
-                job_url = job.get("url", "")
-                method = "pending_manual"
-                success = False
-
-                if job_url and job_url != "nan":
-                    try:
-                        result = await asyncio.to_thread(
-                            browser_tool.apply_to_job_sync,
-                            job_url, resume, job["title"], job["company"], cover_letter
-                        )
-                        success = result.get("success", False)
-                        status_detail = result.get("status", "unknown")
-                        if success:
-                            method = "browser_agent"
-                            applied_ok += 1
-                            logger.success(f"[search_apply] APLICADO: {job['title']} @ {job['company']}")
-                        elif status_detail == "captcha":
-                            method = "blocked_captcha"
-                            applied_fail += 1
-                            logger.warning(f"[search_apply] CAPTCHA: {job['title']}")
-                        elif status_detail == "generic_url":
-                            # URL genérica de carreras → agregar a pending para revisión manual
-                            method = "pending_manual"
-                            applied_fail += 1
-                            import json as _json
-                            import os as _os
-                            _pending_file = "data/pending_browser_tasks.json"
-                            try:
-                                _tasks = _json.load(open(_pending_file)) if _os.path.exists(_pending_file) else []
-                                _tasks.append({
-                                    "type": "apply",
-                                    "url": job_url,
-                                    "contact_name": "",
-                                    "context": f"Aplicar a {job['title']} @ {job['company']} — URL genérica de carreras, encontrar el job específico manualmente",
-                                    "suggested_message": cover_letter[:500] if cover_letter else "",
-                                    "created_at": datetime.now().isoformat(),
-                                    "status": "pending",
-                                    "job_title": job["title"],
-                                    "company": job["company"],
-                                    "score": score,
-                                })
-                                with open(_pending_file, "w") as f:
-                                    _json.dump(_tasks, f, indent=2, ensure_ascii=False)
-                            except Exception as _pe:
-                                logger.warning(f"No se pudo guardar en pending_browser_tasks: {_pe}")
-                            logger.info(f"[search_apply] URL genérica: {job['title']} — guardado en pending_browser_tasks.json")
-                        else:
-                            method = f"browser_failed:{status_detail}"
-                            applied_fail += 1
-                            logger.warning(f"[search_apply] FALLO ({status_detail}): {job['title']}")
-                    except Exception as be:
-                        method = "browser_error"
-                        applied_fail += 1
-                        logger.warning(f"[search_apply] Browser error: {be}")
-                else:
-                    method = "pending_manual"
-                    applied_fail += 1
-                    logger.info(f"[search_apply] Sin URL: {job['title']} — guardado como pending_manual")
-
-                app_status = "applied" if success else ("apply_failed" if "failed" in method or "error" in method else "pending_apply")
-                tracker.save_application(job_id=job_id, method=method, cover_letter=cover_letter, status=app_status)
-
-                await asyncio.sleep(5)  # pausa entre aplicaciones
-
-    summary = (
-        f"[search_apply] Ciclo completo — "
-        f"encontrados: {found_total} | matches: {matched} | "
-        f"aplicados: {applied_ok} | fallidos: {applied_fail}"
-    )
-    logger.success(summary)
-
-    if matched > 0:
-        whatsapp_tool.send_message(
-            f"Ciclo de búsqueda completado:\n"
-            f"• {matched} jobs con match >= {THRESHOLD}%\n"
-            f"• {applied_ok} aplicaciones enviadas\n"
-            f"• {applied_fail} requieren revisión manual"
-        )
+    except Exception as e:
+        logger.exception(f"[queue] Error en application_cycle: {e}")
+        return {"attempted": 0, "applied": 0, "failed": 0, "error": str(e)}
 
 
 EMAIL_BLOCKLIST = {
@@ -766,6 +646,35 @@ async def premium_job_search_task():
         logger.error(f"Error en premium_job_search_task: {e}")
 
 
+async def job_discovery_task():
+    """Búsqueda complementaria y desfasada - cada 3 horas."""
+    logger.info("Ejecutando job_discovery_task (búsqueda complementaria)...")
+    try:
+        from src.agents import job_discovery_agent
+        
+        # Ejecutar discovery en thread síncrono
+        stats = await asyncio.to_thread(job_discovery_agent.discover_jobs)
+        
+        logger.success(f"Discovery completado: {stats['jobs_matched']} jobs con match")
+        logger.success(f"Empresas únicas descubiertas: {stats['unique_companies']}")
+        logger.success(f"High match (>=80%): {stats['high_match']}")
+        logger.success(f"Medium match (70-79%): {stats['medium_match']}")
+        logger.success(f"Duración: {stats['duration_seconds']:.1f}s")
+        
+        # Notificar por WhatsApp si hay buenos matches
+        if stats['jobs_matched'] > 0:
+            high_matches = stats.get('high_match', 0)
+            if high_matches > 0:
+                msg = f"🔍 Job Discovery encontró {stats['jobs_matched']} jobs con match\n"
+                msg += f"• High match (>=80%): {high_matches}\n"
+                msg += f"• Empresas únicas: {stats['unique_companies']}\n"
+                msg += f"📊 Total searches: {stats['total_searches']}"
+                whatsapp_tool.send_message(msg)
+                
+    except Exception as e:
+        logger.error(f"Error en job_discovery_task: {e}")
+
+
 async def image_cleanup_task():
     """Limpia imágenes huérfanas que no están asociadas a ningún post."""
     logger.info("Ejecutando image_cleanup_task...")
@@ -1073,7 +982,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Iniciando orchestrator...")
 
-    # ── SCHEDULED TASKS (updated 2026-04-02) ────────────────────────────────
+    # ── SCHEDULED TASKS (updated 2026-04-14 - OPCIÓN 3: MEZCLA OPTIMIZADA) ─────
     # DESACTIVADOS (respuestas automáticas pausadas):
     # scheduler.add_job(email_monitor_task, "interval", hours=6, id="email_monitor")
     # scheduler.add_job(followup_task, "cron", hour=9, minute=0, id="followup")
@@ -1081,19 +990,64 @@ async def lifespan(app: FastAPI):
 
     # ── ACTIVOS ───────────────────────────────────────────────────────────
 
-    # BÚSQUEDA + APLICACIÓN AUTOMÁTICA: cada hora (tarea principal)
-    scheduler.add_job(search_and_apply_task, "interval", hours=1, id="search_and_apply")
+    # [APPLICATION AGENT] Aplica jobs priorizados cada 2 minutos.
+    # max_instances=1 + coalesce: evita que dos ciclos pisen el mismo job.
+    # Prioriza: score DESC, found_at DESC, filtro <14d. Cap 35 apps/día.
+    scheduler.add_job(
+        queue_task,
+        "interval",
+        minutes=2,
+        id="application_agent",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
+    # Liberar locks de processing que quedaron colgados de runs anteriores.
+    try:
+        from src.db.tracker import JobTracker
+        JobTracker().release_stale_locks(max_age_minutes=30)
+    except Exception as e:
+        logger.warning(f"[startup] No se pudieron liberar locks stale: {e}")
+
+    # [PIPELINE HEALTH] Revisa todo el pipeline cada 4h: detecta procesos
+    # activos (Gmail/LinkedIn/Calendar), re-encola aplicaciones fallidas,
+    # marca ghosted, notifica eventos raros. NO habla con reclutadores.
+    async def pipeline_health_task():
+        logger.info("[pipeline] ===== review cycle =====")
+        try:
+            from src.agents import pipeline_health_agent
+            result = await asyncio.to_thread(pipeline_health_agent.run_pipeline_review)
+            logger.info(f"[pipeline] resultado: {result}")
+            return result
+        except Exception as e:
+            logger.exception(f"[pipeline] Error: {e}")
+            return {"error": str(e)}
+
+    scheduler.add_job(
+        pipeline_health_task,
+        "interval",
+        hours=4,
+        id="pipeline_health",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
+    # [DESACTIVADO] search_and_apply_task: reemplazado por queue_task
+    # scheduler.add_job(search_and_apply_task, "interval", hours=1, id="search_and_apply")
+
+    # [DESACTIVADO] premium_job_search_task: queue manager ya prioriza por score
+    # scheduler.add_job(premium_job_search_task, "interval", hours=1, start_date="2026-04-12 00:30:00", id="premium_job_search")
 
     # Búsqueda legacy (notifica por WhatsApp, sin auto-apply): cada 2h como backup
     scheduler.add_job(job_search_task, "interval", hours=2, id="job_search")
-
-    # Búsqueda premium (score >= 82%): cada hora, offset 30min vs search_and_apply
-    scheduler.add_job(premium_job_search_task, "interval", hours=1, start_date="2026-04-12 00:30:00", id="premium_job_search")
-
-    # LinkedIn content: 3 posts diarios L-V (8am, 1pm, 5pm)
-    scheduler.add_job(linkedin_content_task, "cron", hour=8, minute=0, day_of_week="mon-fri", id="linkedin_content_morning")
-    scheduler.add_job(linkedin_content_task, "cron", hour=13, minute=0, day_of_week="mon-fri", id="linkedin_content_noon")
-    scheduler.add_job(linkedin_content_task, "cron", hour=17, minute=0, day_of_week="mon-fri", id="linkedin_content_evening")
+    
+    # Job Discovery (búsqueda complementaria): cada 3 horas, horarios impares desfasados
+    scheduler.add_job(job_discovery_task, "interval", hours=3, start_date="2026-04-14 01:00:00", id="job_discovery")
+    
+    # LinkedIn content: cada 5 horas (SIMPLE - NO CRON para depuración)
+    scheduler.add_job(linkedin_content_task, "interval", hours=5, id="linkedin_content_simple")
 
     # Inspección de infografías: L-V 9:30, 14:00, 18:00
     scheduler.add_job(image_inspection_task, "cron", hour="9,14,18", minute=30, day_of_week="mon-fri", id="image_inspection")
@@ -1109,7 +1063,9 @@ async def lifespan(app: FastAPI):
 
     # ── STALKER JOBS: 6 grupos, cada hora, escalonados 10min ────────────
     # Cada grupo stalkea 5 empresas específicas buscando vacantes para Alejandro
-    # Escalonados para no saturar: grupo nuevo cada 10 minutos
+    # NOTA: Los stalkers aplican directamente a sus jobs (~2-3 apps/hora por stalker)
+    # El queue manager aplica jobs de job_stalker_agent y job_discovery_agent
+    # Total: ~5-6 apps/hora (seguro, sin saturar LinkedIn)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:00")
     scheduler.add_job(stalker_group_A, "interval", hours=1, id="stalker_A")   # TR, Globant, EPAM, Nubank, MeLi
     scheduler.add_job(stalker_group_B, "interval", hours=1, id="stalker_B")   # Uber, Stripe, Twilio, GitHub, NVIDIA
@@ -1119,16 +1075,17 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(stalker_group_F, "interval", hours=1, id="stalker_F")   # Konfio, Kueski, Conekta, Kavak, Allstate
 
     scheduler.start()
-    logger.success("Scheduler iniciado — búsqueda+aplicación cada hora | 6 stalkers cada hora | LinkedIn content 3x/día")
+    logger.success("Scheduler iniciado — queue manager cada 2min | 6 stalkers cada hora | búsqueda cada 2h | LinkedIn content 5h")
 
     whatsapp_tool.send_message(
         "Agente de búsqueda de empleo activo.\n\n"
-        "Haré esto por ti automáticamente:\n"
-        "• Buscar jobs cada " + str(settings.job_search_interval_hours) + "h\n"
-        "• Revisar mensajes de LinkedIn cada 15min\n"
-        "• Revisar emails cada " + str(settings.email_check_interval_minutes) + "min\n"
-        "• Hablar con reclutadores en tu nombre\n"
-        "• Agendar entrevistas en tu calendario\n\n"
+        "Arquitectura OPCIÓN 3 (Mezcla Optimizada):\n"
+        "• Job Queue Manager: aplica jobs priorizados (5 apps/hora max)\n"
+        "• 6 Company Stalkers: aplican directamente a empresas específicas\n"
+        "• Job Stalker: busca y guarda jobs en BD\n"
+        "• Job Discovery: búsqueda complementaria cada 3h\n"
+        "• LinkedIn Content: posts profesionales cada 5h\n\n"
+        "Total: ~5-6 apps/hora (seguro, sin saturar LinkedIn)\n\n"
         "Te consultaré por aquí antes de enviar cualquier respuesta.\n\n"
         "Comandos:\n"
         "• *estado* - resumen de aplicaciones\n"

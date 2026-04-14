@@ -227,7 +227,7 @@ def stalk_company(
     company: str,
     search_terms: Optional[List[str]] = None,
     locations: Optional[List[str]] = None,
-    auto_apply: bool = True,
+    auto_apply: bool = False,
     notify_whatsapp: bool = True,
 ) -> dict:
     """
@@ -237,7 +237,10 @@ def stalk_company(
         company: Nombre de la empresa a stalkear
         search_terms: Términos de búsqueda (default: DEFAULT_SEARCH_TERMS con company)
         locations: Ubicaciones a buscar (default: remote + Mexico)
-        auto_apply: Intentar aplicar automáticamente
+        auto_apply: DEPRECATED desde 2026-04 — default ahora es False. El
+            application_agent (cada 2min) es el único punto de aplicación. Los
+            stalkers solo guardan en BD con status='found' y dejan que la cola
+            centralizada priorice y aplique con rate limiting global.
         notify_whatsapp: Notificar por WhatsApp si encuentra match
 
     Returns:

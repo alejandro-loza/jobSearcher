@@ -368,12 +368,18 @@ def decide(
             llm_analysis=analysis,
         )
 
-    # ── 9. Todo OK → AUTO_RESPOND ─────────────────────────────────────────────
+    # ── 9. Todo OK → Solo notificar, NO responder automáticamente ──────────────────
     draft = analysis.get("llm_suggested_draft") or ""
     return DecisionResult(
-        decision=ResponseDecision.AUTO_RESPOND,
-        reason=f"Oportunidad válida: {analysis.get('llm_summary', '')}",
+        decision=ResponseDecision.ESCALATE,  # Changed from AUTO_RESPOND for safety
+        reason=f"Oportunidad válida {analysis.get('llm_summary', '')}",
         draft_response=draft,
+        escalation_msg=(
+            f"{'📧' if source == 'email' else '💬'} *{display}* — {analysis.get('llm_suggested_draft', '')}\n"
+            f"Oportunidad interesante! 📧\n"
+            f"Revisa cuando puedas y responde tú mismo.\n"
+            f"Te he notificado por WhatsApp.\n"
+        ),
         llm_analysis=analysis,
     )
 

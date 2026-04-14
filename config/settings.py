@@ -17,6 +17,15 @@ class Settings(BaseSettings):
     glm_temperature: float = Field(default=0.7, env="GLM_TEMPERATURE")
     glm_max_tokens: int = Field(default=4096, env="GLM_MAX_TOKENS")
 
+    # CogView-4-250304 (ZhipuAI) - Image Generation
+    cogview_model: str = Field(default="cogview-4", env="COGVIEW_MODEL")
+    cogview_api_key: str = Field(default="", env="COGVIEW_API_KEY")
+    cogview_base_url: str = Field(
+        default="https://open.bigmodel.cn/api/paas/v4/images/generations", env="COGVIEW_BASE_URL"
+    )
+    cogview_size: str = Field(default="1024x1024", env="COGVIEW_SIZE")
+    cogview_quality: str = Field(default="standard", env="COGVIEW_QUALITY")
+
     # Groq - LLM principal
     groq_api_key: str = Field(default="", env="GROQ_API_KEY")
     groq_model: str = Field(default="llama-3.3-70b-versatile", env="GROQ_MODEL")
@@ -56,6 +65,15 @@ class Settings(BaseSettings):
     linkedin_profile_url: str = Field(default="", env="LINKEDIN_PROFILE_URL")
     linkedin_email: str = Field(default="", env="LINKEDIN_EMAIL")
     linkedin_password: str = Field(default="", env="LINKEDIN_PASSWORD")
+    
+    # LinkedIn Application Settings (Moderado)
+    linkedin_apps_per_hour: int = Field(default=3, env="LINKEDIN_APPS_PER_HOUR")
+    linkedin_delay_min_seconds: int = Field(default=5, env="LINKEDIN_DELAY_MIN_SECONDS")
+    linkedin_delay_max_seconds: int = Field(default=15, env="LINKEDIN_DELAY_MAX_SECONDS")
+    linkedin_pause_after_apps: int = Field(default=5, env="LINKEDIN_PAUSE_AFTER_APPS")
+    linkedin_pause_minutes: int = Field(default=30, env="LINKEDIN_PAUSE_MINUTES")
+    linkedin_enable_workday_apply: bool = Field(default=True, env="LINKEDIN_ENABLE_WORKDAY_APPLY")
+    linkedin_enable_external_apply: bool = Field(default=True, env="LINKEDIN_ENABLE_EXTERNAL_APPLY")
 
     # Job Search
     job_search_interval_hours: int = Field(default=6, env="JOB_SEARCH_INTERVAL_HOURS")

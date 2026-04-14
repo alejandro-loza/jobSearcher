@@ -126,6 +126,10 @@ class JobTracker:
             ("applications",        "attempt_count",   "INTEGER DEFAULT 1"),
             ("applications",        "failure_reason",  "TEXT DEFAULT ''"),
             ("applications",        "apply_method_detail", "TEXT DEFAULT ''"),
+            # Application queue / pipeline health
+            ("jobs",                "being_processed", "INTEGER DEFAULT 0"),
+            ("jobs",                "last_attempt_at", "TEXT"),
+            ("jobs",                "ghosted_at",      "TEXT"),
         ]
         existing = {}
         for table, col, _ in migrations:
@@ -197,6 +201,177 @@ class JobTracker:
                     "SELECT 1 FROM jobs WHERE id = ?", (job_id,)
                 ).fetchone()
             )
+
+    # --- APPLICATION QUEUE (application_agent) ---
+
+    def get_application_queue(
+        self, min_score: int = 75, max_age_days: int = 14, limit: int = 50
+    ) -> List[Dict]:
+        """
+        Retorna jobs listos para aplicar, ordenados por prioridad:
+          1. match_score DESC (mejor match primero)
+          2. found_at DESC (más reciente primero)
+
+        Filtra:
+          - status='found' (no aplicados todavía)
+          - being_processed=0 (no bloqueados por otra ejecución)
+          - score >= min_score
+          - found_at dentro de max_age_days
+          - tiene URL (sin URL no se puede aplicar automáticamente)
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM jobs
+                   WHERE status = 'found'
+                     AND COALESCE(being_processed, 0) = 0
+                     AND COALESCE(match_score, 0) >= ?
+                     AND url IS NOT NULL AND url != ''
+                     AND datetime(found_at) >= datetime('now', ?)
+                   ORDER BY match_score DESC, found_at DESC
+                   LIMIT ?""",
+                (min_score, f"-{max_age_days} days", limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def lock_job_for_processing(self, job_id: str) -> bool:
+        """
+        Lock optimista: marca job como being_processed=1 si estaba en 0.
+        Retorna True si lo logró tomar, False si ya estaba siendo procesado.
+        """
+        with _db_lock:
+            with self._get_conn() as conn:
+                cur = conn.execute(
+                    """UPDATE jobs
+                       SET being_processed = 1,
+                           last_attempt_at = datetime('now')
+                       WHERE id = ?
+                         AND COALESCE(being_processed, 0) = 0""",
+                    (job_id,),
+                )
+                return cur.rowcount > 0
+
+    def release_job_lock(self, job_id: str):
+        """Libera el lock de processing."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE jobs SET being_processed = 0 WHERE id = ?", (job_id,)
+            )
+
+    def release_stale_locks(self, max_age_minutes: int = 30):
+        """
+        Libera locks que llevan más de N minutos — protege contra procesos
+        que murieron sin limpiar. Debe correr al arrancar el orchestrator.
+        """
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                """UPDATE jobs
+                   SET being_processed = 0
+                   WHERE being_processed = 1
+                     AND datetime(last_attempt_at) < datetime('now', ?)""",
+                (f"-{max_age_minutes} minutes",),
+            )
+            if cur.rowcount:
+                logger.warning(f"[tracker] Liberados {cur.rowcount} locks stale")
+
+    def count_applications_today(self) -> int:
+        """Número de aplicaciones exitosas del día actual (para rate limit diario)."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) FROM applications
+                   WHERE status = 'applied'
+                     AND date(applied_at) = date('now')"""
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def mark_job_ghosted(self, job_id: str, notes: str = ""):
+        """Marca un job como ghosted (sin respuesta tras N días)."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """UPDATE jobs
+                   SET status = 'ghosted', ghosted_at = datetime('now')
+                   WHERE id = ?""",
+                (job_id,),
+            )
+            conn.execute(
+                """UPDATE applications
+                   SET status = 'ghosted', last_activity = datetime('now'),
+                       notes = COALESCE(notes, '') || ?
+                   WHERE job_id = ?""",
+                (f" | ghosted: {notes}" if notes else " | ghosted", job_id),
+            )
+
+    # --- PIPELINE HEALTH (pipeline_health_agent) ---
+
+    def get_emails_for_job(self, job_id: str) -> List[Dict]:
+        """Emails asociados directamente a un job_id."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM emails
+                   WHERE job_id = ?
+                   ORDER BY received_at DESC""",
+                (job_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_emails_by_company(self, company: str, days: int = 30) -> List[Dict]:
+        """
+        Emails cuyo 'from_address' contiene el nombre de la empresa
+        (match por dominio aproximado). Útil cuando no hay job_id directo.
+        """
+        with self._get_conn() as conn:
+            # Dominio simplificado: primera palabra de company, sin espacios, minúsculas
+            domain_hint = company.split()[0].lower() if company else ""
+            rows = conn.execute(
+                """SELECT * FROM emails
+                   WHERE (LOWER(from_address) LIKE ?
+                          OR LOWER(subject) LIKE ?
+                          OR LOWER(content) LIKE ?)
+                     AND datetime(received_at) >= datetime('now', ?)
+                   ORDER BY received_at DESC""",
+                (
+                    f"%{domain_hint}%",
+                    f"%{company.lower()}%",
+                    f"%{company.lower()}%",
+                    f"-{days} days",
+                ),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_conversations_by_company(self, company: str) -> List[Dict]:
+        """
+        Conversaciones de LinkedIn donde el participante menciona la empresa
+        en su título/headline (ej. "Recruiter at Audible").
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM linkedin_conversations
+                   WHERE LOWER(participant_title) LIKE ?
+                   ORDER BY last_message_at DESC""",
+                (f"%{company.lower()}%",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_interviews_for_job(self, job_id: str) -> List[Dict]:
+        """Entrevistas agendadas para un job (cualquier status)."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM interviews
+                   WHERE job_id = ?
+                   ORDER BY scheduled_at DESC""",
+                (job_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def days_since_applied(self, job_id: str) -> Optional[int]:
+        """Retorna días desde que se aplicó a un job (None si no se ha aplicado)."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT julianday('now') - julianday(applied_at) AS days
+                   FROM applications WHERE job_id = ?
+                   ORDER BY applied_at DESC LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else None
 
     # --- APPLICATIONS ---
 
