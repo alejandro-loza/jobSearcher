@@ -439,111 +439,138 @@ Marca valid: false si hay CUALQUIER error factual. Sé estricto.""")
         return False, f"Error en validación: {e}"  # Si falla la validación, NO publicar
 
 
-def create_and_publish_post(max_retries: int = 3) -> bool:
-    """Full pipeline: genera contenido + infografía → valida info → guarda para revisión.
+def _generate_infographic(infographic_data: dict, topic: str) -> Optional[str]:
+    """Genera la infografía apropiada según el tipo. Retorna ruta PNG o None."""
+    if not infographic_data:
+        return None
+    try:
+        from src.tools.infographic_tool import (
+            generate_comparison_infographic,
+            generate_flow_infographic,
+            generate_tips_infographic,
+        )
+        inf_type = infographic_data.get("type", "tips")
+        if inf_type == "tips":
+            return generate_tips_infographic(
+                title=infographic_data.get("title", topic),
+                subtitle=infographic_data.get("subtitle", ""),
+                tips=infographic_data.get("tips", []),
+            )
+        elif inf_type == "comparison":
+            return generate_comparison_infographic(
+                title=infographic_data.get("title", topic),
+                subtitle=infographic_data.get("subtitle", ""),
+                left_label=infographic_data.get("left_label", "Antes"),
+                right_label=infographic_data.get("right_label", "Después"),
+                comparisons=infographic_data.get("comparisons", []),
+            )
+        elif inf_type == "flow":
+            return generate_flow_infographic(
+                title=infographic_data.get("title", topic),
+                subtitle=infographic_data.get("subtitle", ""),
+                steps=infographic_data.get("steps", []),
+            )
+    except Exception as e:
+        logger.error(f"[content_agent] Infographic generation failed: {e}")
+    return None
+
+
+def _inspector_feedback(inspection: dict) -> str:
+    """Convierte resultado de image_inspector en feedback legible para el crew."""
+    issues = []
+    fa = inspection.get("factual_accuracy", {})
+    dq = inspection.get("design_quality", {})
+    if not fa.get("passed"):
+        issues.append(f"Precisión factual insuficiente (score {fa.get('confidence',0):.2f}): {(fa.get('notes') or '')[:200]}")
+    if not dq.get("passed"):
+        issues.append(f"Diseño insuficiente (score {dq.get('score',0)}/100): {(dq.get('notes') or '')[:200]}")
+    extracted = inspection.get("extracted_text", {})
+    if not extracted.get("all_text_readable", True):
+        issues.append("Texto truncado u overlapping en la infografía — usa títulos más cortos (máx 4 palabras)")
+    return " | ".join(issues) if issues else "Inspección falló por razón desconocida"
+
+
+def create_and_publish_post(max_retries: int = 2) -> bool:
+    """
+    Pipeline completo con CrewAI: 3 Writers → Critic → Infografía → Inspección.
     NUNCA publica directamente. Todo queda pendiente de aprobación de Alejandro.
-    Retries up to max_retries times if validation fails (with feedback to LLM)."""
+
+    Flujo:
+      1. Crew genera 3 variantes (tips, comparison, story)
+      2. Critic elige la mejor y la mejora
+      3. Se genera la infografía
+      4. image_inspector valida hechos + diseño
+      5. Si falla → retry con feedback al crew (max_retries veces)
+      6. Si pasa → guarda como pending_review
+    """
+    from src.agents import content_crew, image_inspector_agent
+
     log = _load_log()
-
-    # 1. Select topic
     topic = select_next_topic()
+    feedback = ""
 
-    # 2. Generate + validate with retries
-    content = None
-    post_text = ""
-    hashtags = []
-    infographic_data = {}
-    is_valid = False
-    validation_notes = ""
-    previous_issues = ""
+    for attempt in range(max_retries + 1):
+        logger.info(f"[content_agent] Crew attempt {attempt + 1}/{max_retries + 1} for '{topic}'")
 
-    for attempt in range(1, max_retries + 1):
-        logger.info(f"[content_agent] Generation attempt {attempt}/{max_retries} for '{topic}'")
-
+        # ── Paso 1: Crew genera y critica ──
         try:
-            if attempt == 1:
-                content = generate_post_content(topic)
-            else:
-                content = _regenerate_post_content(topic, previous_issues)
+            content = content_crew.run_content_crew(topic, feedback=feedback)
         except Exception as e:
-            logger.error(f"[content_agent] Content generation failed (attempt {attempt}): {e}")
-            continue
+            logger.error(f"[content_agent] Crew failed (attempt {attempt + 1}): {e}")
+            if attempt < max_retries:
+                feedback = f"Error en generación anterior: {str(e)[:100]}"
+                continue
+            return False
 
         post_text = content.get("text", "")
-        hashtags = content.get("hashtags", [])
-        infographic_data = content.get("infographic_data", {})
-
         if not post_text:
-            logger.error("[content_agent] Empty post text generated")
+            logger.error("[content_agent] Crew returned empty text")
             continue
 
-        # Validate
-        is_valid, validation_notes = validate_content_with_details(post_text, topic)
-        if is_valid:
-            logger.info(f"[content_agent] Validation PASSED for '{topic}' on attempt {attempt}")
-            break
+        # ── Paso 2: Generar infografía ──
+        image_path = _generate_infographic(content.get("infographic_data", {}), topic)
+
+        # ── Paso 3: Inspeccionar imagen ──
+        post_entry = {
+            "topic": topic,
+            "text": post_text,
+            "hashtags": content.get("hashtags", []),
+            "image_path": image_path,
+            "infographic_data": content.get("infographic_data", {}),
+            "style_used": content.get("style_used", "unknown"),
+            "crew_scores": content.get("scores", {}),
+            "generated_at": datetime.now().isoformat(),
+            "status": "pending_review",
+            "published": False,
+        }
+
+        if image_path:
+            inspection = image_inspector_agent.inspect_image(post_entry)
+            if inspection.get("passed"):
+                logger.success(f"[content_agent] Inspección OK (intento {attempt + 1}). Guardando para revisión.")
+                post_entry["inspection"] = inspection
+                log["posts"].append(post_entry)
+                log["topics_used"] = log.get("topics_used", []) + [topic]
+                _save_log(log)
+                return True
+            else:
+                feedback = _inspector_feedback(inspection)
+                logger.warning(
+                    f"[content_agent] Inspección FALLÓ (intento {attempt + 1}): {feedback[:120]}"
+                )
+                # Borrar imagen fallida
+                if image_path and os.path.exists(image_path):
+                    os.remove(image_path)
         else:
-            logger.warning(f"[content_agent] Validation FAILED (attempt {attempt}) for '{topic}': {validation_notes}")
-            previous_issues = validation_notes
+            # Sin imagen: guardar de todos modos (publicará solo texto)
+            logger.info(f"[content_agent] Sin imagen. Guardando post de texto para revisión.")
+            log["posts"].append(post_entry)
+            log["topics_used"] = log.get("topics_used", []) + [topic]
+            _save_log(log)
+            return True
 
-    if not is_valid:
-        logger.error(f"[content_agent] All {max_retries} attempts failed validation for '{topic}'")
-        return False
-
-    # 4. Generate infographic with VERIFIED data only
-    image_path = None
-    if infographic_data:
-        try:
-            from src.tools.infographic_tool import (
-                generate_tips_infographic,
-                generate_comparison_infographic,
-                generate_flow_infographic,
-            )
-            inf_type = infographic_data.get("type", "tips")
-            if inf_type == "tips":
-                image_path = generate_tips_infographic(
-                    title=infographic_data.get("title", topic),
-                    subtitle=infographic_data.get("subtitle", ""),
-                    tips=infographic_data.get("tips", []),
-                )
-            elif inf_type == "comparison":
-                image_path = generate_comparison_infographic(
-                    title=infographic_data.get("title", topic),
-                    subtitle=infographic_data.get("subtitle", ""),
-                    left_label=infographic_data.get("left_label", "Antes"),
-                    right_label=infographic_data.get("right_label", "Después"),
-                    comparisons=infographic_data.get("comparisons", []),
-                )
-            elif inf_type == "flow":
-                image_path = generate_flow_infographic(
-                    title=infographic_data.get("title", topic),
-                    subtitle=infographic_data.get("subtitle", ""),
-                    steps=infographic_data.get("steps", []),
-                )
-        except Exception as e:
-            logger.error(f"[content_agent] Infographic generation failed: {e}")
-
-    # 5. NUNCA publicar — guardar como pendiente de revisión
-    logger.info(f"[content_agent] Post + infografía generados. PENDIENTE DE REVISIÓN: {topic}")
-
-    # 6. Guardar en log como pendiente
-    now = datetime.now().isoformat()
-    post_entry = {
-        "topic": topic,
-        "text": post_text,
-        "hashtags": hashtags,
-        "image_path": image_path,
-        "validation": {"passed": is_valid, "notes": validation_notes},
-        "generated_at": now,
-        "status": "pending_review",  # pending_review → approved → published | rejected
-        "published": False,
-    }
-    log["posts"].append(post_entry)
-    log["topics_used"] = log.get("topics_used", []) + [topic]
-    _save_log(log)
-
-    logger.info(f"[content_agent] Post guardado para revisión. Topic: {topic}")
-    return True  # Generado exitosamente (no publicado)
+    logger.error(f"[content_agent] Agotados {max_retries + 1} intentos para '{topic}'")
+    return False
 
 
 def approve_and_publish(post_index: int = -1) -> bool:
