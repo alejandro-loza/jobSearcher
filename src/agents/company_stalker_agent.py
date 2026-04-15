@@ -268,7 +268,7 @@ def stalk_company(
         )
 
     if locations is None:
-        locations = ["remote", "Mexico"]
+        locations = ["Ciudad de Mexico", "Mexico", "remote"]
 
     # Buscar vacantes
     all_jobs = []

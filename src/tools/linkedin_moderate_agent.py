@@ -25,11 +25,11 @@ from config import settings
 # CONFIGURACIÓN MODERADA - ANTI-BANNING
 # ============================================================================
 
-APPS_PER_HOUR = settings.linkedin_apps_per_hour  # Muy conservador: 3 apps/hora
+APPS_PER_HOUR = 10  # Temporalmente 10 apps/hora para aplicar hoy
 DELAY_MIN = settings.linkedin_delay_min_seconds     # 5 segundos mínimo
 DELAY_MAX = settings.linkedin_delay_max_seconds     # 15 segundos máximo
-PAUSE_AFTER_APPS = settings.linkedin_pause_after_apps  # Pausar después de 5 apps
-PAUSE_MINUTES = settings.linkedin_pause_minutes      # Pausar 30 minutos
+PAUSE_AFTER_APPS = 999  # Desactivar pausas automáticas por hoy
+PAUSE_MINUTES = 5  # Pausa corta si se activa
 
 # User agents realistas (Chrome latest)
 USER_AGENTS = [

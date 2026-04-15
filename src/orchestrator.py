@@ -606,7 +606,7 @@ async def premium_job_search_task():
                 jobs = await asyncio.to_thread(
                     jobspy_tool.search_jobs,
                     search_term=term,
-                    location="remote",
+                    location="Ciudad de Mexico",
                     results_wanted=10,
                     hours_old=24,  # solo últimas 24h
                 )
@@ -1197,11 +1197,10 @@ async def _process_whatsapp(raw_message: str, message: str):
         whatsapp_tool.send_message(text)
 
     else:
-        # Respuesta libre con LLM
-        resume = _load_resume()
-        stats = tracker.get_stats()
+        # AI Orchestrator — lenguaje natural con tool calling
+        from src.agents import ai_orchestrator_agent
         response = await asyncio.to_thread(
-            master_agent.handle_whatsapp_command, raw_message, stats, resume
+            ai_orchestrator_agent.process_message, raw_message
         )
         whatsapp_tool.send_message(response)
 
@@ -1304,6 +1303,38 @@ async def get_failed_applications_api():
 async def get_application_stats_api():
     """Estadísticas de aplicaciones por status."""
     return tracker.get_application_stats()
+
+
+@app.get("/api/job/{job_id}/timeline")
+async def job_timeline(job_id: str):
+    """
+    Agrega toda la información de una vacante para el dashboard:
+    job info + historial de aplicaciones + emails + LinkedIn + entrevistas.
+    """
+    from fastapi import HTTPException
+    job = tracker.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+    company = job.get("company", "")
+    emails = tracker.get_emails_for_job(job_id)
+    if not emails and company:
+        emails = tracker.get_emails_by_company(company, days=60)
+    return {
+        "job": dict(job),
+        "applications": tracker.get_full_pipeline_for_job(job_id),
+        "emails": emails,
+        "linkedin": tracker.get_conversations_by_company(company) if company else [],
+        "interviews": tracker.get_interviews_for_job(job_id),
+        "days_since_applied": tracker.days_since_applied(job_id),
+    }
+
+
+@app.post("/api/chat/reset")
+async def reset_chat():
+    """Limpia el historial de conversación del AI Orchestrator."""
+    from src.agents import ai_orchestrator_agent
+    ai_orchestrator_agent.reset_conversation()
+    return {"ok": True, "message": "Historial de conversación limpiado"}
 
 
 @app.get("/api/conversations")
@@ -1628,7 +1659,7 @@ async def _manual_search(keywords: str):
     resume = _load_resume()
     jobs = jobspy_tool.search_jobs(
         search_term=keywords,
-        location="remote",
+        location="Ciudad de Mexico",
         results_wanted=10,
         hours_old=168,
     )

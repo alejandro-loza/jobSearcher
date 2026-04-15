@@ -92,6 +92,8 @@ TOP_TIER_COMPANIES = [
 
 # Ubicaciones complementarias
 DISCOVERY_LOCATIONS = [
+    "Ciudad de Mexico",
+    "Mexico",
     "remote",
     "United States",
     "Canada",
@@ -99,7 +101,6 @@ DISCOVERY_LOCATIONS = [
     "Germany",
     "Netherlands",
     "Spain",
-    "Mexico",
     "Brazil",
 ]
 

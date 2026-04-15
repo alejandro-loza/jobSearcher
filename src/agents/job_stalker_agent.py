@@ -27,14 +27,14 @@ from loguru import logger
 
 # Términos de búsqueda optimizados para el perfil de Alejandro
 SEARCH_TERMS = [
-    "Senior Java Developer Remote",
-    "Java Spring Boot Developer",
-    "Lead Java Engineer",
-    "Principal Java Developer",
-    "Java Microservices Engineer",
-    "Java Backend Engineer Remote",
-    "Java Software Architect",
-    "Senior Software Engineer Java",
+    "Senior Java Developer Ciudad de Mexico",
+    "Java Spring Boot Developer Ciudad de Mexico",
+    "Lead Java Engineer Ciudad de Mexico",
+    "Principal Java Developer Ciudad de Mexico",
+    "Java Microservices Engineer Ciudad de Mexico",
+    "Java Backend Engineer Ciudad de Mexico",
+    "Java Software Architect Ciudad de Mexico",
+    "Senior Software Engineer Java Ciudad de Mexico",
 ]
 
 # Keywords de alto match para el perfil de Alejandro
