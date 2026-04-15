@@ -28,6 +28,14 @@ class JobTracker:
     def _init_db(self):
         with self._get_conn() as conn:
             conn.executescript("""
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tool_name TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                );
+
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -299,6 +307,45 @@ class JobTracker:
                    WHERE job_id = ?""",
                 (f" | ghosted: {notes}" if notes else " | ghosted", job_id),
             )
+
+    def get_full_pipeline_for_job(self, job_id: str) -> List[Dict]:
+        """Historial de aplicaciones para un job específico (para timeline)."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM applications
+                   WHERE job_id = ?
+                   ORDER BY applied_at DESC""",
+                (job_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # --- CHAT HISTORY (ai_orchestrator_agent) ---
+
+    def save_chat_message(self, role: str, content: str, tool_name: str = None):
+        """Guarda un mensaje en el historial de conversación."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO chat_history (role, content, tool_name)
+                   VALUES (?, ?, ?)""",
+                (role, content, tool_name),
+            )
+
+    def get_chat_history(self, limit: int = 20) -> List[Dict]:
+        """Retorna los últimos N mensajes del historial."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT role, content, tool_name, created_at
+                   FROM chat_history
+                   ORDER BY id DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return list(reversed([dict(r) for r in rows]))
+
+    def clear_chat_history(self):
+        """Limpia el historial (útil para reset manual)."""
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM chat_history")
 
     # --- PIPELINE HEALTH (pipeline_health_agent) ---
 
@@ -698,12 +745,21 @@ class JobTracker:
             rejected = conn.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status = 'rejected'"
             ).fetchone()[0]
+            ghosted = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE status = 'ghosted'"
+            ).fetchone()[0]
+            active = conn.execute(
+                """SELECT COUNT(*) FROM jobs WHERE status IN
+                   ('interview_scheduled','offer_received','applying')"""
+            ).fetchone()[0]
             return {
                 "total_found": total,
                 "applied": applied,
                 "interviews_scheduled": interviews,
                 "rejected": rejected,
-                "pending": total - applied - interviews - rejected,
+                "ghosted": ghosted,
+                "active_processes": active,
+                "pending": total - applied - interviews - rejected - ghosted,
             }
 
     # --- LINKEDIN CONVERSATIONS ---

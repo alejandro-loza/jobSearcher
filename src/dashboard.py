@@ -156,6 +156,24 @@ def generate_dashboard_html() -> str:
                     <div class="text-4xl font-bold mb-1" id="stat-rejected">0</div>
                     <div class="text-sm text-gray-500 font-medium">Rechazos / Cerrados</div>
                 </div>
+                <div class="glass p-6 rounded-3xl group hover:border-emerald-500/30 transition-all">
+                    <div class="flex justify-between items-start mb-4">
+                        <div class="p-3 bg-emerald-500/10 rounded-2xl text-emerald-400">
+                            <i data-lucide="activity" class="w-6 h-6"></i>
+                        </div>
+                    </div>
+                    <div class="text-4xl font-bold mb-1 text-emerald-400" id="stat-active">0</div>
+                    <div class="text-sm text-gray-500 font-medium">Procesos Activos</div>
+                </div>
+                <div class="glass p-6 rounded-3xl group hover:border-gray-500/30 transition-all">
+                    <div class="flex justify-between items-start mb-4">
+                        <div class="p-3 bg-gray-500/10 rounded-2xl text-gray-400">
+                            <i data-lucide="ghost" class="w-6 h-6"></i>
+                        </div>
+                    </div>
+                    <div class="text-4xl font-bold mb-1 text-gray-400" id="stat-ghosted">0</div>
+                    <div class="text-sm text-gray-500 font-medium">Ghosted</div>
+                </div>
             </div>
 
             <!-- Pipeline Visual (Kanban Lite) -->
@@ -203,6 +221,9 @@ def generate_dashboard_html() -> str:
                 <button onclick="setJobFilter('pending_apply')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-filter="pending_apply">
                     Pendientes
                 </button>
+                <button onclick="setJobFilter('ghosted')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-filter="ghosted">
+                    👻 Ghosted
+                </button>
                 <button onclick="setJobFilter('rejected')" class="job-filter-btn px-4 py-2 rounded-xl text-xs font-bold transition-all bg-white/5 text-gray-400 hover:bg-white/10" data-filter="rejected">
                     Rechazados
                 </button>
@@ -248,11 +269,10 @@ def generate_dashboard_html() -> str:
                                 <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('match_score')">Score</th>
                                 <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('title')">Job / Empresa</th>
                                 <th class="px-5 py-4">Ubicación</th>
-                                <th class="px-5 py-4">Salario</th>
                                 <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('status')">Status</th>
-                                <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('source')">Fuente</th>
+                                <th class="px-5 py-4">Actividad</th>
                                 <th class="px-5 py-4 cursor-pointer hover:text-white" onclick="sortJobs('found_at')">Fecha</th>
-                                <th class="px-5 py-4">Acción</th>
+                                <th class="px-5 py-4">Ver</th>
                             </tr>
                         </thead>
                         <tbody id="jobs-tbody" class="divide-y divide-white/5">
@@ -288,11 +308,19 @@ def generate_dashboard_html() -> str:
                         <span class="px-3 py-1 bg-white/5 rounded-lg text-xs text-gray-400" id="modal-salary"></span>
                         <span class="px-3 py-1 bg-white/5 rounded-lg text-xs text-gray-400" id="modal-source"></span>
                     </div>
-                    <div class="text-sm text-gray-300 leading-relaxed whitespace-pre-line max-h-[40vh] overflow-y-auto mb-6 scrollbar-hide" id="modal-description"></div>
-                    <div class="flex gap-3">
-                        <a id="modal-url" href="#" target="_blank" class="px-6 py-2.5 bg-primary-600 hover:bg-primary-500 text-white rounded-xl text-sm font-semibold flex items-center gap-2">
+                    <!-- Tabs -->
+                    <div class="flex gap-1 mb-4 border-b border-white/10">
+                        <button onclick="switchModalTab('desc')" id="tab-desc" class="px-4 py-2 text-xs font-bold text-white border-b-2 border-primary-500">Descripción</button>
+                        <button onclick="switchModalTab('activity')" id="tab-activity" class="px-4 py-2 text-xs font-bold text-gray-500 border-b-2 border-transparent hover:text-gray-300">Actividad</button>
+                    </div>
+                    <div id="tab-desc-content">
+                        <div class="text-sm text-gray-300 leading-relaxed whitespace-pre-line max-h-[35vh] overflow-y-auto mb-4 scrollbar-hide" id="modal-description"></div>
+                        <a id="modal-url" href="#" target="_blank" class="px-5 py-2 bg-primary-600 hover:bg-primary-500 text-white rounded-xl text-sm font-semibold inline-flex items-center gap-2">
                             <i data-lucide="external-link" class="w-4 h-4"></i> Ver Vacante
                         </a>
+                    </div>
+                    <div id="tab-activity-content" class="hidden">
+                        <div id="modal-timeline" class="text-xs max-h-[40vh] overflow-y-auto scrollbar-hide"></div>
                     </div>
                 </div>
              </div>
@@ -421,13 +449,40 @@ def generate_dashboard_html() -> str:
 
         function statusBadge(st) {{
             const m = {{
-                'found': 'bg-blue-500/10 text-blue-400',
-                'applied': 'bg-green-500/10 text-green-400',
-                'pending_apply': 'bg-yellow-500/10 text-yellow-400',
-                'rejected': 'bg-red-500/10 text-red-400',
+                'found':               'bg-blue-500/10 text-blue-400',
+                'applied':             'bg-green-500/10 text-green-400',
+                'pending_apply':       'bg-yellow-500/10 text-yellow-400',
+                'rejected':            'bg-red-500/10 text-red-400',
                 'interview_scheduled': 'bg-purple-500/10 text-purple-400',
+                'ghosted':             'bg-gray-500/10 text-gray-400',
+                'applying':            'bg-blue-400/10 text-blue-300',
+                'apply_failed':        'bg-orange-500/10 text-orange-400',
+                'apply_needs_manual':  'bg-yellow-500/10 text-yellow-300',
+                'offer_received':      'bg-emerald-500/10 text-emerald-400',
             }};
             return m[st] || 'bg-white/5 text-gray-400';
+        }}
+
+        function statusLabel(st) {{
+            const m = {{
+                'found': 'Nuevo', 'applied': 'Aplicado', 'pending_apply': 'Pendiente',
+                'rejected': 'Rechazado', 'interview_scheduled': '📅 Entrevista',
+                'ghosted': '👻 Ghosted', 'applying': 'Aplicando...',
+                'apply_failed': 'Falló', 'apply_needs_manual': 'Manual',
+                'offer_received': '🎯 Oferta',
+            }};
+            return m[st] || st;
+        }}
+
+        function activityBadge(j) {{
+            const icons = [];
+            if (j.status === 'interview_scheduled' || j.status === 'offer_received')
+                icons.push('<span title="Proceso activo" class="text-emerald-400">🔥</span>');
+            if (j.status === 'applied' || j.status === 'interview_scheduled')
+                icons.push('<span title="Ver actividad" class="text-blue-400 text-xs">📧</span>');
+            if (j.status === 'ghosted')
+                icons.push('<span title="Sin respuesta">👻</span>');
+            return icons.length ? icons.join(' ') : '<span class="text-gray-600 text-xs">—</span>';
         }}
 
         function sourceBadge(src) {{
@@ -505,56 +560,147 @@ def generate_dashboard_html() -> str:
             document.getElementById('jobs-stat-high').innerText = allJobs.filter(j => (j.match_score || 0) >= 75).length;
 
             const tbody = document.getElementById('jobs-tbody');
-            tbody.innerHTML = page.map((j, i) => `
-                <tr class="hover:bg-white/[0.03] cursor-pointer" onclick="openJobModal(${{start + i}})">
+            tbody.innerHTML = page.map((j, i) => {{
+                const activityIcons = activityBadge(j);
+                return `
+                <tr class="hover:bg-white/[0.03] cursor-pointer" onclick="openJobTimeline('${{j.id}}', '${{(j.title||'').replace(/'/g,"\\'")}}',${{start + i}})">
                     <td class="px-5 py-3.5">
-                        <div class="flex items-center gap-2">
-                            <div class="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm ${{scoreColor(j.match_score || 0)}}">
-                                ${{j.match_score || 0}}
-                            </div>
+                        <div class="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm ${{scoreColor(j.match_score || 0)}}">
+                            ${{j.match_score || 0}}
                         </div>
                     </td>
                     <td class="px-5 py-3.5">
                         <div class="font-semibold text-white text-sm line-clamp-1 max-w-xs">${{j.title || 'N/A'}}</div>
                         <div class="text-xs text-gray-500">${{j.company || 'N/A'}}</div>
                     </td>
-                    <td class="px-5 py-3.5 text-xs text-gray-400 max-w-[120px] truncate">${{j.location && j.location !== 'nan' ? j.location : 'Remote'}}</td>
-                    <td class="px-5 py-3.5 text-xs text-gray-400">${{j.salary || '---'}}</td>
+                    <td class="px-5 py-3.5 text-xs text-gray-400 max-w-[100px] truncate">${{j.location && j.location !== 'nan' ? j.location : 'Remote'}}</td>
                     <td class="px-5 py-3.5">
-                        <span class="text-[10px] px-2.5 py-1 rounded-lg font-bold uppercase ${{statusBadge(j.status)}}">${{j.status}}</span>
+                        <span class="text-[10px] px-2.5 py-1 rounded-lg font-bold uppercase ${{statusBadge(j.status)}}">${{statusLabel(j.status)}}</span>
                     </td>
-                    <td class="px-5 py-3.5">
-                        <span class="text-[10px] px-2.5 py-1 rounded-lg font-bold uppercase ${{sourceBadge(j.source)}}">${{j.source}}</span>
-                    </td>
+                    <td class="px-5 py-3.5 text-sm">${{activityIcons}}</td>
                     <td class="px-5 py-3.5 text-xs text-gray-500">${{(j.found_at || '').substring(5, 16).replace('T', ' ')}}</td>
                     <td class="px-5 py-3.5">
-                        <a href="${{j.url}}" target="_blank" onclick="event.stopPropagation()" class="p-1.5 px-3 bg-white/5 rounded-lg text-[10px] hover:bg-white/10 transition-all inline-flex items-center gap-1">
-                            <i data-lucide="external-link" class="w-3 h-3"></i> Link
-                        </a>
+                        <button onclick="event.stopPropagation();openJobTimeline('${{j.id}}','${{(j.title||'').replace(/'/g,"\\'")}}', ${{start+i}})"
+                            class="p-1.5 px-3 bg-white/5 rounded-lg text-[10px] hover:bg-primary-500/20 hover:text-primary-400 transition-all inline-flex items-center gap-1">
+                            <i data-lucide="panel-right" class="w-3 h-3"></i> Ver
+                        </button>
                     </td>
-                </tr>
-            `).join('') || '<tr><td colspan="8" class="text-center py-10 text-gray-500 italic">No se encontraron vacantes con estos filtros</td></tr>';
+                </tr>`;
+            }}).join('') || '<tr><td colspan="7" class="text-center py-10 text-gray-500 italic">No se encontraron vacantes con estos filtros</td></tr>';
             lucide.createIcons();
         }}
 
-        function openJobModal(idx) {{
-            const j = filteredJobs[idx];
-            if (!j) return;
-            document.getElementById('modal-title').innerText = j.title || 'N/A';
+        function openJobModal(idx) {{ openJobTimeline(filteredJobs[idx]?.id, filteredJobs[idx]?.title, idx); }}
+
+        async function openJobTimeline(jobId, jobTitle, idx) {{
+            const j = filteredJobs[idx] || {{}};
+            // Header inmediato
+            document.getElementById('modal-title').innerText = j.title || jobTitle || 'N/A';
             document.getElementById('modal-company').innerText = (j.company || '') + (j.location && j.location !== 'nan' ? ' · ' + j.location : ' · Remote');
             const sb = document.getElementById('modal-score-badge');
             sb.innerText = (j.match_score || 0) + '% match';
             sb.className = `px-3 py-1 rounded-lg text-xs font-bold ${{scoreColor(j.match_score || 0)}}`;
             document.getElementById('modal-location').innerText = j.location && j.location !== 'nan' ? j.location : 'Remote';
-            document.getElementById('modal-salary').innerText = j.salary || 'Salario no especificado';
+            document.getElementById('modal-salary').innerText = j.salary || '—';
             document.getElementById('modal-source').innerText = (j.source || '').toUpperCase();
-            document.getElementById('modal-description').innerText = (j.description || 'Sin descripción disponible').substring(0, 3000);
+            document.getElementById('modal-description').innerText = (j.description || 'Sin descripción disponible').substring(0, 2000);
             document.getElementById('modal-url').href = j.url || '#';
+            document.getElementById('modal-timeline').innerHTML = '<div class="text-gray-500 text-xs py-4 text-center">Cargando actividad...</div>';
             document.getElementById('job-modal').classList.remove('hidden');
+
+            // Fetch timeline
+            try {{
+                const data = await fetch(`/api/job/${{jobId}}/timeline`).then(r => r.json());
+                renderTimeline(data);
+            }} catch(e) {{
+                document.getElementById('modal-timeline').innerHTML = '<div class="text-gray-600 text-xs py-4 text-center">Sin actividad registrada</div>';
+            }}
+        }}
+
+        function renderTimeline(data) {{
+            const el = document.getElementById('modal-timeline');
+            const sections = [];
+
+            // Aplicaciones
+            if (data.applications?.length) {{
+                const a = data.applications[0];
+                sections.push(`<div class="mb-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold mb-1">Aplicación</div>
+                    <div class="flex items-center gap-2 text-xs">
+                        <span class="text-[10px] px-2 py-0.5 rounded font-bold uppercase ${{statusBadge(a.status)}}">${{statusLabel(a.status)}}</span>
+                        <span class="text-gray-500">${{(a.applied_at||'').substring(0,10)}}</span>
+                        <span class="text-gray-600">${{a.method||''}}</span>
+                        ${{a.attempt_count > 1 ? `<span class="text-orange-400 text-[10px]">${{a.attempt_count}} intentos</span>` : ''}}
+                    </div>
+                    ${{a.failure_reason ? `<div class="text-orange-400 text-[10px] mt-1">${{a.failure_reason}}</div>` : ''}}
+                </div>`);
+            }}
+
+            // Días desde aplicación
+            if (data.days_since_applied !== null && data.days_since_applied !== undefined) {{
+                const d = data.days_since_applied;
+                const color = d >= 21 ? 'text-gray-400' : d >= 7 ? 'text-yellow-400' : 'text-green-400';
+                sections.push(`<div class="text-xs ${{color}} mb-3">⏱ ${{d}} días desde aplicación</div>`);
+            }}
+
+            // Entrevistas
+            if (data.interviews?.length) {{
+                sections.push(`<div class="mb-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold mb-1">📅 Entrevistas</div>
+                    ${{data.interviews.map(i => `
+                        <div class="text-xs text-purple-300 mb-1">
+                            ${{(i.scheduled_at||'').substring(0,16).replace('T',' ')}}
+                            ${{i.interviewer ? '· ' + i.interviewer : ''}}
+                            <span class="text-[10px] text-purple-500">${{i.status}}</span>
+                        </div>
+                    `).join('')}}
+                </div>`);
+            }}
+
+            // Emails
+            if (data.emails?.length) {{
+                sections.push(`<div class="mb-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold mb-1">📧 Emails (${{data.emails.length}})</div>
+                    ${{data.emails.slice(0,3).map(e => {{
+                        const sentIcon = {{'positive':'✅','interview':'📅','negative':'❌'}}[e.sentiment] || '📧';
+                        return `<div class="text-xs mb-1.5 border-l-2 border-white/10 pl-2">
+                            <span class="mr-1">${{sentIcon}}</span>
+                            <span class="text-white/80">${{(e.subject||'Sin asunto').substring(0,50)}}</span>
+                            <span class="text-gray-500 ml-1 text-[10px]">${{(e.received_at||'').substring(0,10)}}</span>
+                        </div>`;
+                    }}).join('')}}
+                </div>`);
+            }}
+
+            // LinkedIn
+            if (data.linkedin?.length) {{
+                sections.push(`<div class="mb-3">
+                    <div class="text-[10px] text-gray-500 uppercase font-bold mb-1">💬 LinkedIn</div>
+                    ${{data.linkedin.slice(0,2).map(c => `
+                        <div class="text-xs mb-1 flex items-center gap-2">
+                            <span class="text-white/80">${{c.participant_name||'?'}}</span>
+                            <span class="text-[10px] text-gray-500">${{(c.participant_title||'').substring(0,35)}}</span>
+                            <span class="text-[10px] px-1.5 py-0.5 bg-white/5 rounded text-gray-400">${{c.state}}</span>
+                        </div>
+                    `).join('')}}
+                </div>`);
+            }}
+
+            el.innerHTML = sections.length
+                ? sections.join('<div class="border-t border-white/5 my-2"></div>')
+                : '<div class="text-gray-600 text-xs py-4 text-center">Sin actividad registrada aún</div>';
         }}
 
         function closeJobModal() {{
             document.getElementById('job-modal').classList.add('hidden');
+            switchModalTab('desc');
+        }}
+
+        function switchModalTab(tab) {{
+            document.getElementById('tab-desc-content').classList.toggle('hidden', tab !== 'desc');
+            document.getElementById('tab-activity-content').classList.toggle('hidden', tab !== 'activity');
+            document.getElementById('tab-desc').className = `px-4 py-2 text-xs font-bold border-b-2 ${{tab==='desc'?'text-white border-primary-500':'text-gray-500 border-transparent hover:text-gray-300'}}`;
+            document.getElementById('tab-activity').className = `px-4 py-2 text-xs font-bold border-b-2 ${{tab==='activity'?'text-white border-primary-500':'text-gray-500 border-transparent hover:text-gray-300'}}`;
         }}
 
         // -- DATA LOADING --
@@ -562,10 +708,12 @@ def generate_dashboard_html() -> str:
             try {{
                 // Stats
                 const stats = await fetch('/api/stats').then(r => r.json());
-                document.getElementById('stat-total').innerText = stats.total_found;
-                document.getElementById('stat-applied').innerText = stats.applied;
-                document.getElementById('stat-interviews').innerText = stats.interviews_scheduled;
-                document.getElementById('stat-rejected').innerText = stats.rejected;
+                document.getElementById('stat-total').innerText = stats.total_found || 0;
+                document.getElementById('stat-applied').innerText = stats.applied || 0;
+                document.getElementById('stat-interviews').innerText = stats.interviews_scheduled || 0;
+                document.getElementById('stat-rejected').innerText = stats.rejected || 0;
+                document.getElementById('stat-active').innerText = stats.active_processes || 0;
+                document.getElementById('stat-ghosted').innerText = stats.ghosted || 0;
 
                 // Jobs — load all
                 allJobs = await fetch('/api/jobs?status=all&limit=2000').then(r => r.json());

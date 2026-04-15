@@ -188,6 +188,59 @@ def invoke_vision(
         raise
 
 
+def invoke_with_tools(
+    messages: list[BaseMessage],
+    tools: list,
+    temperature: float = 0.1,
+) -> "BaseMessage":
+    """
+    Invoca LLM con tool calling (OpenAI function calling format).
+    Retorna el AIMessage completo — puede tener .tool_calls o .content.
+
+    Provider order: Groq → SambaNova (GLM excluido por saldo inconsistente).
+    temperature bajo (0.1) = más determinístico en selección de tools.
+
+    Uso:
+        from langchain_core.tools import tool
+
+        @tool
+        def buscar_empleos(query: str) -> str:
+            \"\"\"Busca empleos con el término dado.\"\"\"
+            ...
+
+        ai_msg = invoke_with_tools(messages, [buscar_empleos])
+        if ai_msg.tool_calls:
+            for tc in ai_msg.tool_calls:
+                result = buscar_empleos.invoke(tc)
+    """
+    providers = []
+    if settings.groq_api_key:
+        providers.append(("Groq", _build_groq(temperature, max_tokens=4096)))
+    if settings.sambanova_api_key:
+        providers.append(("SambaNova", _build_sambanova(temperature, max_tokens=4096)))
+    if settings.glm_api_key:
+        providers.append(("GLM-4-Plus", _build_glm(temperature, max_tokens=4096)))
+
+    if not providers:
+        raise RuntimeError("No hay LLMs configurados para tool calling.")
+
+    last_error = None
+    for name, llm in providers:
+        try:
+            llm_with_tools = llm.bind_tools(tools)
+            response = llm_with_tools.invoke(messages)
+            logger.debug(
+                f"[coordinator] tool_call → {name} | "
+                f"tool_calls={len(getattr(response, 'tool_calls', []))}"
+            )
+            return response
+        except Exception as e:
+            logger.warning(f"[coordinator] {name} falló tool_call: {str(e)[:100]}")
+            last_error = e
+
+    raise RuntimeError(f"invoke_with_tools: todos los LLMs fallaron. {last_error}")
+
+
 def get_token_stats() -> dict:
     """Retorna estadísticas de tokens usados desde el inicio del proceso."""
     stats = {}
