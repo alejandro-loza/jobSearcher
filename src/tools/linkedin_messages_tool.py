@@ -24,6 +24,7 @@ from loguru import logger
 LINKEDIN_SENDING_BLOCKED = True
 
 from config import settings
+from src.tools import linkedin_governor
 
 _MY_PROFILE_ID = "ACoAAA75U08B8QCgw24NcNxPaIYIH-OFh35cZ2Q"
 _GRAPHQL_BASE = "https://www.linkedin.com/voyager/api/voyagerMessagingGraphQL/graphql"
@@ -55,10 +56,7 @@ def _build_session() -> requests.Session:
     s.headers.update({
         "csrf-token": jsessionid,
         "X-RestLi-Protocol-Version": "2.0.0",
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": linkedin_governor.USER_AGENT,
         "Accept": "application/json",
         "x-li-lang": "en_US",
     })
@@ -98,8 +96,7 @@ def _build_playwright_context():
         user_data_dir=_PROFILE_DIR,
         headless=True,
         args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        user_agent=linkedin_governor.USER_AGENT,
         viewport={"width": 1280, "height": 800},
     )
     context.add_init_script(
@@ -485,6 +482,12 @@ def send_message(
         logger.warning(f"[KILL SWITCH] LinkedIn msg a {sender_name or conversation_id} BLOQUEADO — LINKEDIN_SENDING_BLOCKED=True")
         return False
 
+    # ── GOVERNOR — presupuesto anti-ban de la cuenta ─────────────────────
+    _ok, _reason = linkedin_governor.can_act(linkedin_governor.MSG_SEND)
+    if not _ok:
+        logger.warning(f"[gov] LinkedIn msg a {sender_name or conversation_id} BLOQUEADO — {_reason}")
+        return False
+
     # ── RESPONSE DECISION AGENT — última palabra ─────────────────────────
     if not _bypass_decision_agent:
         from src.agents.response_decision_agent import approve_outgoing
@@ -503,6 +506,7 @@ def send_message(
     # ── Intentar envío por HTTP REST API primero (sin Playwright) ──────────
     if _send_message_http(conversation_id, text):
         logger.success(f"[send] Enviado via HTTP a {sender_name or conversation_id[:20]}")
+        linkedin_governor.record_action(linkedin_governor.MSG_SEND, meta=conversation_id[:40])
         return True
     logger.info("[send] HTTP falló, cayendo a Playwright...")
 
@@ -570,6 +574,7 @@ def send_message(
 
         browser.close()
         pw.stop()
+        linkedin_governor.record_action(linkedin_governor.MSG_SEND, meta=conversation_id[:40])
         return True
 
     except Exception as e:
@@ -626,8 +631,7 @@ def refresh_cookies():
                   "--window-size=1280,800"],
         )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            user_agent=linkedin_governor.USER_AGENT,
             viewport={"width": 1280, "height": 800},
         )
         context.add_init_script(

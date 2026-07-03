@@ -16,6 +16,7 @@ except ImportError:
     logger.warning("jobspy no instalado. Ejecuta: pip install python-jobspy")
 
 from config import settings
+from src.tools import liveness
 
 
 def _load_linkedin_cookies() -> Dict[str, str]:
@@ -56,6 +57,21 @@ def search_jobs(
     if site_names is None:
         site_names = ["linkedin", "indeed", "glassdoor"]
 
+    # Governor anti-ban: LinkedIn es la superficie de baneo. Si el presupuesto de
+    # búsqueda de LinkedIn está agotado (o fuera de ventana), NO bloqueamos la
+    # búsqueda — caemos a los demás sitios (Indeed/Glassdoor). Así los stalkers
+    # siguen descubriendo vacantes sin ráfagas de scraping autenticado a LinkedIn.
+    from src.tools import linkedin_governor as gov
+    if "linkedin" in site_names:
+        ok, reason = gov.can_act(gov.SEARCH)
+        if ok:
+            gov.record_action(gov.SEARCH, meta=str(search_term)[:40])
+        else:
+            site_names = [s for s in site_names if s != "linkedin"]
+            logger.info(f"[jobspy] governor limitó LinkedIn ({reason}) → sitios: {site_names}")
+            if not site_names:
+                return []
+
     cookies = _load_linkedin_cookies()
     li_at = cookies.get("li_at", "")
 
@@ -73,6 +89,10 @@ def search_jobs(
             hours_old=hours_old,
             linkedin_fetch_description=True,
         )
+
+        loc_lower = (location or "").lower()
+        if any(k in loc_lower for k in ("mexico", "méxico", "cdmx", "df", "distrito federal")):
+            kwargs["country_indeed"] = "Mexico"
 
         # Usar cookies de LinkedIn si están disponibles
         if li_at:
@@ -99,26 +119,59 @@ def search_jobs(
             except Exception:
                 vacancy_count = None
 
+            site = str(row.get("site", ""))
+            job_url = str(row.get("job_url", ""))
+            if easy_apply_only:
+                if "indeed.com" in job_url:
+                    ats_type = "indeed_apply"
+                elif "linkedin.com" in job_url:
+                    ats_type = "linkedin_easy_apply"
+                else:
+                    ats_type = "easy_apply"
+            else:
+                ats_type = "unknown"
+
             job = {
                 "id": job_id,
                 "title": str(row.get("title", "")),
                 "company": str(row.get("company", "")),
                 "location": str(row.get("location", "")),
                 "description": str(row.get("description", ""))[:3000],
-                "url": str(row.get("job_url", "")),
+                "url": job_url,
                 "salary": _extract_salary(row),
-                "source": str(row.get("site", "")),
+                "source": site,
                 "job_type": str(row.get("job_type", "")),
                 "date_posted": str(row.get("date_posted", "")),
-                "easy_apply": bool(row.get("is_remote", False)),
+                "easy_apply": bool(easy_apply_only),
                 "emails_in_job": str(row.get("emails", "")),
                 "company_url": str(row.get("company_url", "")),
                 "applicants": vacancy_count,
                 "skills": str(row.get("skills", "")),
                 "job_level": str(row.get("job_level", "")),
                 "company_industry": str(row.get("company_industry", "")),
+                "ats_type": ats_type,
             }
             jobs.append(job)
+
+        # Filtrar ghost postings ANTES de gastar tokens evaluando match
+        alive_jobs = []
+        ghost_count = 0
+        for j in jobs:
+            skip, reason = liveness.should_skip_job(
+                {
+                    **j,
+                    "num_applicants": j.get("applicants"),
+                }
+            )
+            if skip:
+                ghost_count += 1
+                logger.debug(f"[ghost] {j['title']} @ {j['company']} — {reason}")
+                continue
+            alive_jobs.append(j)
+
+        if ghost_count:
+            logger.info(f"  → {ghost_count} ghost postings filtrados (0 tokens gastados)")
+        jobs = alive_jobs
 
         # Ordenar: primero los que tienen pocos applicantes (LinkedIn Premium data)
         jobs_with_count = [j for j in jobs if j.get("applicants") is not None]

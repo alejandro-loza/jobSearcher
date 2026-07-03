@@ -255,11 +255,11 @@ def estado_ban_linkedin() -> str:
     """Verifica si LinkedIn está baneado o en recovery mode. Muestra aplicaciones
     enviadas hoy y el daily cap configurado."""
     try:
-        from src.agents.application_agent import get_ban_state, _current_daily_cap
+        from src.tools import linkedin_governor as gov
         t = JobTracker()
-        ban = get_ban_state()
+        ban = gov.get_ban_state()
         today = t.count_applications_today()
-        cap = _current_daily_cap()
+        cap = gov.apply_daily_cap()
         state = ban.get("current_state", "ok")
         icon = {"ok": "✅", "banned": "🚫", "recovering": "⚠️"}.get(state, "❓")
         result = (

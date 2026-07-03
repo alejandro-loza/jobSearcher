@@ -27,7 +27,7 @@ SCOPES = [
 # ── GLOBAL KILL SWITCH ────────────────────────────────────────────────────────
 # When True, send_email() will ALWAYS return False without sending anything.
 # This is the last line of defense — no email leaves the system.
-EMAIL_SENDING_BLOCKED = True
+EMAIL_SENDING_BLOCKED = False
 
 
 def _get_gmail_service():

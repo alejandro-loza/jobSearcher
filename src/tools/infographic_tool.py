@@ -28,39 +28,39 @@ import numpy as np
 from loguru import logger
 
 # ---------------------------------------------------------------------------
-# Color palette — modern gradient dark theme
+# Color palette — modern gradient dark theme (Ultra Premium)
 # ---------------------------------------------------------------------------
-GRADIENT_COLORS = ["#0f0c29", "#302b63", "#24243e"]
-ACCENT_BLUE = "#00d2ff"
-ACCENT_PURPLE = "#7c3aed"
-ACCENT_GREEN = "#50fa7b"
-ACCENT_PINK = "#ff79c6"
-ACCENT_YELLOW = "#f1fa8c"
-ACCENT_CYAN = "#8be9fd"
-ACCENT_ORANGE = "#ffb86c"
-ACCENT_RED = "#ff5555"
+GRADIENT_COLORS = ["#05050A", "#130F24", "#05050A"]
+ACCENT_BLUE = "#00E5FF"
+ACCENT_PURPLE = "#9D4EDD"
+ACCENT_GREEN = "#00F5D4"
+ACCENT_PINK = "#F15BB5"
+ACCENT_YELLOW = "#FEE440"
+ACCENT_CYAN = "#00BBF9"
+ACCENT_ORANGE = "#FF9E00"
+ACCENT_RED = "#FF0A54"
 
 COLORS = {
-    "bg_top": "#0f0c29",
-    "bg_mid": "#302b63",
-    "bg_bot": "#24243e",
-    "card": "#ffffff10",
-    "card_border": "#ffffff20",
-    "glass_highlight": "#ffffff08",
+    "bg_top": "#05050A",
+    "bg_mid": "#130F24",
+    "bg_bot": "#05050A",
+    "card": "#ffffff0c",
+    "card_border": "#ffffff25",
+    "glass_highlight": "#ffffff10",
     "accent": ACCENT_BLUE,
     "accent2": ACCENT_GREEN,
     "accent3": ACCENT_PURPLE,
-    "text": "#e2e8f0",
-    "text_dim": "#94a3b8",
-    "text_bright": "#ffffff",
-    "code_bg": "#0d1117",
-    "code_border": "#30363d",
-    "line_num_bg": "#0a0e14",
-    "header_bg": "#ffffff0a",
-    "left_col": "#ff6b35",
-    "right_col": "#00c9a7",
-    "vs_bg": "#7c3aed",
-    "number_badge": "#7c3aed",
+    "text": "#F8FAFC",
+    "text_dim": "#CBD5E1",
+    "text_bright": "#FFFFFF",
+    "code_bg": "#0B0F19",
+    "code_border": "#1E293B",
+    "line_num_bg": "#070A11",
+    "header_bg": "#ffffff15",
+    "left_col": "#FF5400",
+    "right_col": "#00F5D4",
+    "vs_bg": "#9D4EDD",
+    "number_badge": "#9D4EDD",
 }
 
 # Syntax highlighting colors (Dracula-inspired)
@@ -99,7 +99,7 @@ def _draw_gradient_background(fig, ax):
 
     cmap = LinearSegmentedColormap.from_list(
         "bg_grad",
-        [(0, "#0f0c29"), (0.5, "#302b63"), (1, "#24243e")],
+        [(0, GRADIENT_COLORS[0]), (0.5, GRADIENT_COLORS[1]), (1, GRADIENT_COLORS[2])],
     )
     ax.imshow(
         gradient, aspect="auto", cmap=cmap,

@@ -27,14 +27,14 @@ from loguru import logger
 
 # Términos de búsqueda optimizados para el perfil de Alejandro
 SEARCH_TERMS = [
-    "Senior Java Developer Ciudad de Mexico",
-    "Java Spring Boot Developer Ciudad de Mexico",
-    "Lead Java Engineer Ciudad de Mexico",
-    "Principal Java Developer Ciudad de Mexico",
-    "Java Microservices Engineer Ciudad de Mexico",
-    "Java Backend Engineer Ciudad de Mexico",
-    "Java Software Architect Ciudad de Mexico",
-    "Senior Software Engineer Java Ciudad de Mexico",
+    "Java Developer",
+    "Spring Boot Developer",
+    "Java Spring Boot",
+    "Senior Java Engineer",
+    "Java Microservices",
+    "Backend Java",
+    "Desarrollador Java",
+    "Ingeniero Java Spring Boot",
 ]
 
 # Keywords de alto match para el perfil de Alejandro
@@ -74,32 +74,41 @@ EXCLUDE_KEYWORDS = [
     "data analyst",
     "product manager",
     "project manager",
+    # Modalidades que no aplican al piso salarial actual
+    "honorarios",
+    "freelance",
+    "por hora",
 ]
+
+# Piso salarial vigente: $60,000 MXN 100% nómina (basado en oferta IDS 2026-06)
+SALARY_FLOOR_MXN = 60_000
 
 # Ubicaciones a priorizar
 PRIORITY_LOCATIONS = ["Remote", "United States", "Mexico"]
 
 # Empresas top-tier para bonus en scoring
 TOP_TIER_COMPANIES = [
-    "GitHub",
-    "Netflix",
-    "Uber",
-    "Amazon",
-    "Google",
-    "Microsoft",
-    "Apple",
-    "Twilio",
-    "Airbnb",
-    "Zillow",
-    "Stripe",
-    "Square",
-    "Airbnb",
+    "Google", "Microsoft", "Amazon", "AWS", "Apple", "Meta", "Netflix", "NVIDIA", "Adobe", 
+    "Salesforce", "Oracle", "IBM", "Cisco", "LinkedIn", "Intel", "SAP",
+    "Stripe", "PayPal", "Block", "Square", "Adyen", "Nubank", "Mercado Libre", "Mercado Pago", 
+    "Brex", "Revolut", "Bitso", "Robinhood", "Klarna", "Plaid", "Affirm", "Wise", 
+    "Checkout.com", "SoFi", "Citadel", "JPMorgan", "Goldman Sachs", "Carta",
+    "Snowflake", "Databricks", "Confluent", "Datadog", "HashiCorp", "Cloudflare", "MongoDB", 
+    "Elastic", "Okta", "CrowdStrike", "Palo Alto Networks", "Snyk", "GitHub", "DigitalOcean", "Fastly",
+    "Atlassian", "Slack", "Zoom", "ServiceNow", "Zendesk", "HubSpot", "Monday.com", "Asana", 
+    "DocuSign", "Dropbox", "Pinterest", "Shopify", "Twilio", "Figma", "Canva",
+    "Airbnb", "Uber", "Lyft", "Booking.com", "Expedia", "DoorDash", "Instacart", "Rappi", 
+    "Kavak", "Jüsto", "Wayfair", "Zalando", "Coupang", "eBay", "Chewy",
+    "Spotify", "Disney+", "Warner Bros", "Roku", "Roblox", "Unity", "Epic Games", "Riot Games", 
+    "Discord", "Reddit",
+    "Clip", "Konfío", "Kueski", "Wizeline", "Globant", "BairesDev", "NTT Data", "Accenture", 
+    "Tata Consultancy Services", "TCS", "Capgemini"
 ]
 
 # Parámetros de búsqueda
-MAX_RESULTS_PER_SEARCH = 15
-SEARCH_HOURS_OLD = 72  # Buscar jobs de las últimas 72h
-MIN_SCORE_TO_SAVE = 70  # Solo guardar jobs con score >= 70%
+MAX_RESULTS_PER_SEARCH = 40
+SEARCH_HOURS_OLD = 168  # Últimas 168h (7 días) para no perder vacantes
+MIN_SCORE_TO_SAVE = 65  # Guardar con score >= 65% (el application_agent filtra >= 75%)
 
 # ---------------------------------------------------------------------------
 # Scoring Functions
@@ -138,7 +147,8 @@ def calculate_base_score(job: dict) -> int:
 
 def should_exclude_job(job: dict) -> bool:
     """
-    Verifica si el job debe ser excluido por keywords no deseados.
+    Verifica si el job debe ser excluido por keywords no deseados o salario bajo el piso.
+    Piso actual: $60,000 MXN nómina formal (actualizado 2026-06 por oferta IDS).
     """
     title = job.get("title", "").lower()
     description = job.get("description", "").lower()
@@ -146,7 +156,18 @@ def should_exclude_job(job: dict) -> bool:
     exclude_count = sum(
         1 for kw in EXCLUDE_KEYWORDS if kw in title or kw in description
     )
-    return exclude_count > 0
+    if exclude_count > 0:
+        return True
+
+    # Excluir si JobSpy devuelve salario estructurado bajo el piso
+    max_salary = job.get("max_salary") or 0
+    min_salary = job.get("min_salary") or 0
+    if max_salary and max_salary < SALARY_FLOOR_MXN:
+        return True
+    if min_salary and max_salary == 0 and min_salary < 45_000:
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -166,13 +187,13 @@ def run_stalker_search():
     jobs_saved = 0
 
     # Ejecutar búsquedas
-    for term in SEARCH_TERMS[:5]:  # Limitar a primeros 5 términos
+    for term in SEARCH_TERMS:  # Buscar todos los términos
         logger.info(f"[stalker] Buscando: '{term}' en Remote")
 
         try:
             jobs = jobspy_tool.search_jobs(
                 search_term=term,
-                location="Remote",
+                location="Mexico",
                 results_wanted=MAX_RESULTS_PER_SEARCH,
                 hours_old=SEARCH_HOURS_OLD,
                 site_names=["linkedin", "indeed"],

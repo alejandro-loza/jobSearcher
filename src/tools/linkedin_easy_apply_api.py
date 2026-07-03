@@ -15,6 +15,7 @@ import requests
 from loguru import logger
 
 from config import settings
+from src.tools import linkedin_governor
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +47,7 @@ def _build_api_session() -> requests.Session:
         "x-restli-protocol-version": "2.0.0",
         "x-li-lang": "en_US",
         "x-li-track": '{"clientVersion":"1.13.1768","osName":"web","timezoneOffset":-6}',
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": linkedin_governor.USER_AGENT,
         "Accept": "application/vnd.linkedin.normalized+json+2.1",
         "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
         "Referer": "https://www.linkedin.com/jobs/",
@@ -287,6 +285,13 @@ def submit_easy_apply(
     if not job_id:
         return {"success": False, "status": "error", "message": f"No se pudo extraer job ID de: {job_url}"}
 
+    # Choke point anti-ban: cualquier caller (application_agent o scripts sueltos)
+    # pasa por el presupuesto de cuenta del governor antes de tocar LinkedIn.
+    _ok, _reason = linkedin_governor.can_act(linkedin_governor.APPLY)
+    if not _ok:
+        logger.warning(f"[li_api] Easy Apply bloqueado por governor: {_reason}")
+        return {"success": False, "status": "rate_limited", "message": _reason}
+
     session = _build_api_session()
 
     # Verificar sesión
@@ -344,6 +349,7 @@ def submit_easy_apply(
 
         if r.status_code in (200, 201):
             logger.success(f"[li_api] Easy Apply exitoso para job {job_id}")
+            linkedin_governor.record_action(linkedin_governor.APPLY, meta=job_id)
             return {"success": True, "status": "success", "message": f"Easy Apply enviado para job {job_id}"}
 
         elif r.status_code == 409:

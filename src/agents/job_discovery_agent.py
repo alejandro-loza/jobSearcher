@@ -9,6 +9,7 @@ Se ejecuta en horarios diferentes para distribuir la carga del sistema.
 - Prioriza empresas no trackingeadas por el stalker principal
 """
 import json
+import re
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -29,88 +30,60 @@ from src.agents import master_agent
 
 # Términos de búsqueda complementarios (diferentes a job_stalker_agent)
 DISCOVERY_SEARCH_TERMS = [
-    # Backend Senior - variantes adicionales
-    "Senior Backend Engineer Java",
-    "Principal Java Developer",
-    "Lead Software Engineer Java",
-    "Java Staff Engineer",
-    "Engineering Manager Java",
-    
-    # Full Stack - enfocado en arquitectura
-    "Senior Full Stack Architect",
-    "Technical Lead Java JavaScript",
-    "Solutions Architect Java",
-    
-    # Cloud Senior - roles de liderazgo
-    "Cloud Architect AWS",
-    "Senior Cloud Engineer GCP",
-    "Platform Engineer AWS",
-    "DevOps Architect",
-    "Site Reliability Engineer",
-    
-    # Integración de IA - área de crecimiento
-    "AI Backend Engineer Java",
-    "Machine Learning Engineer Java",
-    "LLM Integration Engineer",
-    "AI Platform Engineer",
-    "Prompt Engineer Python",
-    
-    # Especializaciones avanzadas
-    "Kafka Specialist",
-    "Microservices Architect",
-    "Distributed Systems Engineer",
-    "Real-time Data Engineer",
-    "Payment Systems Engineer Java",
-    
-    # Senior roles en español
-    "Arquitecto Java Senior",
-    "Lider Técnico Java Spring Boot",
-    "Ingeniero Senior Backend Java",
-    "Arquitecto Cloud AWS",
+    # Java / Spring Boot — core
+    "Java Spring Boot",
+    "Senior Java Developer",
+    "Spring Boot Microservices",
+    "Java Backend Senior",
+    "Desarrollador Java Senior",
+    "Ingeniero Java Spring Boot",
+    "Java Microservices Developer",
+    "Lead Java Engineer",
+    # Variantes con tecnologías del stack de Alejandro
+    "Java AWS",
+    "Java Kubernetes",
+    "Java REST API",
+    "Spring Boot REST",
+    "Java Cloud Engineer",
+    # En español
+    "Arquitecto Java",
+    "Líder Técnico Java Spring",
+    "Desarrollador Backend Java Spring Boot",
+    "Ingeniero Software Senior Java",
 ]
 
 # Empresas top-tier adicionales (complemento a las del job_stalker)
 TOP_TIER_COMPANIES = [
-    "Stripe",
-    "Square",
-    "Twilio",
-    "Airbnb",
-    "Uber",
-    "Netflix",
-    "Spotify",
-    "Meta",
-    "Twitter",
-    "Salesforce",
-    "ServiceNow",
-    "Snowflake",
-    "Databricks",
-    "Datadog",
-    "HashiCorp",
-    "MongoDB",
-    "Redis Labs",
+    "Google", "Microsoft", "Amazon", "AWS", "Apple", "Meta", "Netflix", "NVIDIA", "Adobe", 
+    "Salesforce", "Oracle", "IBM", "Cisco", "LinkedIn", "Intel", "SAP",
+    "Stripe", "PayPal", "Block", "Square", "Adyen", "Nubank", "Mercado Libre", "Mercado Pago", 
+    "Brex", "Revolut", "Bitso", "Robinhood", "Klarna", "Plaid", "Affirm", "Wise", 
+    "Checkout.com", "SoFi", "Citadel", "JPMorgan", "Goldman Sachs", "Carta",
+    "Snowflake", "Databricks", "Confluent", "Datadog", "HashiCorp", "Cloudflare", "MongoDB", 
+    "Elastic", "Okta", "CrowdStrike", "Palo Alto Networks", "Snyk", "GitHub", "DigitalOcean", "Fastly",
+    "Atlassian", "Slack", "Zoom", "ServiceNow", "Zendesk", "HubSpot", "Monday.com", "Asana", 
+    "DocuSign", "Dropbox", "Pinterest", "Shopify", "Twilio", "Figma", "Canva",
+    "Airbnb", "Uber", "Lyft", "Booking.com", "Expedia", "DoorDash", "Instacart", "Rappi", 
+    "Kavak", "Jüsto", "Wayfair", "Zalando", "Coupang", "eBay", "Chewy",
+    "Spotify", "Disney+", "Warner Bros", "Roku", "Roblox", "Unity", "Epic Games", "Riot Games", 
+    "Discord", "Reddit",
+    "Clip", "Konfío", "Kueski", "Wizeline", "Globant", "BairesDev", "NTT Data", "Accenture", 
+    "Tata Consultancy Services", "TCS", "Capgemini"
 ]
 
 # Ubicaciones complementarias
 DISCOVERY_LOCATIONS = [
     "Ciudad de Mexico",
-    "Mexico",
-    "remote",
-    "United States",
-    "Canada",
-    "United Kingdom",
-    "Germany",
-    "Netherlands",
-    "Spain",
-    "Brazil",
+    "CDMX",
 ]
 
 # Sitios para búsqueda complementaria
-DISCOVERY_SITES = ["linkedin", "indeed", "glassdoor"]
+DISCOVERY_SITES = ["linkedin", "indeed"]
 
 # Parámetros de búsqueda
-MAX_RESULTS_PER_SEARCH = 10  # Menos agresivo para no saturar
-HOURS_OLD = 72  # Últimas 72 horas
-MATCH_THRESHOLD = 70  # Slightly more permissive
+MAX_RESULTS_PER_SEARCH = 40
+HOURS_OLD = 168  # Últimas 7 días
+MATCH_THRESHOLD = 65  # application_agent filtra >= 75%, aquí somos permisivos
 
 # Log de discovery para evitar duplicados
 DISCOVERY_LOG_FILE = "data/job_discovery_log.json"
@@ -200,7 +173,7 @@ def _evaluate_job_match(job: dict, resume: dict) -> tuple[int, str]:
         (score, reasons) tuple
     """
     try:
-        score, reasons = master_agent.evaluate_job(job, resume)
+        score, reasons = master_agent.evaluate_job_match(job, resume)
         return score, reasons
     except Exception as e:
         logger.error(f"Error evaluando match: {e}")
@@ -246,6 +219,41 @@ def _get_final_score(base_score: int, job: dict) -> int:
     bonus = _calculate_bonus_score(job)
     final_score = base_score + bonus
     return min(final_score, 100)  # Max 100
+
+
+# Patrones que indican salario bajo el piso (60k MXN)
+_LOW_SALARY_PATTERNS = [
+    re.compile(r"\$\s*([\d,]+)\s*(?:MXN|pesos|mxp)?", re.IGNORECASE),
+]
+_HONORARIOS_PATTERNS = re.compile(
+    r"\bhonorarios\b|\bfreelance\b|\bpor hora\b|\bby the hour\b|\bcontractor\b|\bassimilados\b",
+    re.IGNORECASE,
+)
+
+
+def _should_reject_by_salary(job: dict) -> tuple[bool, str]:
+    """
+    Filtro pre-LLM: descarta jobs cuyo salario explícito está bajo el piso
+    ($60,000 MXN nómina) o que son honorarios/freelance.
+
+    Solo rechaza cuando hay evidencia clara — si el salario no aparece,
+    deja pasar al LLM para evaluación completa.
+    """
+    description = (job.get("description") or "") + " " + (job.get("title") or "")
+    min_salary = job.get("min_salary") or 0
+    max_salary = job.get("max_salary") or 0
+
+    # Rechazar honorarios / freelance explícitos
+    if _HONORARIOS_PATTERNS.search(description):
+        return True, "honorarios/freelance detectado en descripción"
+
+    # Si JobSpy devuelve salario estructurado y está bajo el piso
+    if max_salary and max_salary < 60_000:
+        return True, f"salario máximo ${max_salary:,.0f} < $60,000 piso"
+    if min_salary and max_salary == 0 and min_salary < 45_000:
+        return True, f"salario mínimo ${min_salary:,.0f} muy bajo el piso"
+
+    return False, ""
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +308,13 @@ def discover_jobs() -> dict:
                     if _already_discovered(log, job_id):
                         logger.debug(f"[job_discovery] Skip (ya descubierto): {job.get('title')}")
                         continue
-                    
+
+                    # Filtro pre-LLM: piso salarial $60k nómina
+                    reject, reject_reason = _should_reject_by_salary(job)
+                    if reject:
+                        logger.debug(f"[job_discovery] Rechazado por salario ({reject_reason}): {job.get('title')}")
+                        continue
+
                     # Evaluar match con CV
                     base_score, reasons = _evaluate_job_match(job, resume)
                     final_score = _get_final_score(base_score, job)

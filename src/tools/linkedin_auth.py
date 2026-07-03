@@ -12,6 +12,7 @@ from loguru import logger
 from playwright.sync_api import sync_playwright
 
 from config import settings
+from src.tools import linkedin_governor
 
 
 def login_and_save_cookies() -> bool:
@@ -37,10 +38,7 @@ def login_and_save_cookies() -> bool:
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
         ctx = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+            user_agent=linkedin_governor.USER_AGENT,
             viewport={"width": 1366, "height": 768},
         )
         page = ctx.new_page()
@@ -163,7 +161,7 @@ def verify_session() -> bool:
     session.headers.update({
         "csrf-token": jsessionid,
         "x-restli-protocol-version": "2.0.0",
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": linkedin_governor.USER_AGENT,
         "Accept": "application/vnd.linkedin.normalized+json+2.1",
     })
 

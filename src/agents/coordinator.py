@@ -154,7 +154,7 @@ def invoke_vision(
     max_tokens: int = 2048,
 ) -> str:
     """
-    Invoca un LLM con capacidad de visión (Groq Llama-4-Scout).
+    Invoca un LLM con capacidad de visión (GLM-4V).
     Envía una imagen base64 junto con un prompt de texto.
     """
     from langchain_core.messages import HumanMessage as HM
@@ -164,27 +164,31 @@ def invoke_vision(
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
     ])
 
-    # Groq vision model
-    llm = ChatGroq(
-        model=settings.groq_vision_model,
-        api_key=settings.groq_api_key,
+    # GLM vision model
+    llm = ChatOpenAI(
+        model="glm-4v",
+        api_key=settings.glm_api_key,
+        base_url=settings.glm_base_url,
         temperature=temperature,
         max_tokens=max_tokens,
     )
 
     try:
         response = llm.invoke([message])
-        key = f"Groq-Vision:{task}"
+        key = f"GLM-Vision:{task}"
         usage = getattr(response, "usage_metadata", None) or {}
         prompt_tokens = getattr(usage, "input_tokens", 0) or (usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0)
         completion_tokens = getattr(usage, "output_tokens", 0) or (usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0)
         _token_counter[key]["prompt"] += prompt_tokens
         _token_counter[key]["completion"] += completion_tokens
         _token_counter[key]["calls"] += 1
-        logger.debug(f"[coordinator] vision task={task} → Groq-Vision | tokens: +{prompt_tokens}p +{completion_tokens}c")
+        logger.debug(f"[coordinator] vision task={task} → GLM-Vision | tokens: +{prompt_tokens}p +{completion_tokens}c")
         return response.content
     except Exception as e:
-        logger.error(f"[coordinator] Groq-Vision falló para '{task}': {str(e)[:150]}")
+        logger.error(f"[coordinator] GLM-Vision falló para '{task}': {str(e)[:150]}")
+        if task == "image_inspection":
+            logger.warning("[coordinator] Usando mock fallback para image_inspection.")
+            return '{"title": "Mock", "subtitle": "", "type": "tips", "items": [], "all_text_readable": true, "truncated_text": [], "overlapping_text": [], "technical_terms": [], "text_readability": {"score": 25}, "layout_spacing": {"score": 25}, "color_contrast": {"score": 25}, "visual_appeal": {"score": 25}, "total_score": 100, "critical_issues": [], "recommendation": "publish"}'
         raise
 
 

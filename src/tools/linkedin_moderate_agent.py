@@ -1,11 +1,15 @@
 """
 LinkedIn Application Agent - Moderate & Anti-Banning
 
-Sistema de aplicaciones automáticas a LinkedIn con estrategias anti-banning:
-- Comportamientos humanos con delays realistas
-- Rate limiting inteligente
-- Soporte para portales externos (Workday, Greenhouse, etc.)
-- Integración segura con el orchestrator
+⚠️ DEPRECADO como motor de rate-limit. El ejecutor vivo de aplicaciones es
+`src/agents/application_agent.py` (Voyager API) y la política anti-ban (caps,
+horario, gap, presupuesto global de la cuenta, ban/recovery) vive ÚNICAMENTE en
+`src/tools/linkedin_governor.py`. Los contadores globales de este módulo
+(app_count_today, etc.) se resetean al reiniciar el proceso y NO deben usarse
+como límite. Cualquier apply de aquí pasa por `linkedin_governor.can_act(APPLY)`.
+
+Este módulo se conserva solo por su lógica de portales externos (Workday,
+Greenhouse, Lever). No lo agendes en el scheduler.
 """
 
 import asyncio
@@ -516,9 +520,16 @@ async def _apply_linkedin_easy_apply(
     job_details: Optional[Dict],
 ) -> Dict[str, Any]:
     """Aplicación LinkedIn Easy Apply con estrategia moderada."""
-    
+    from src.tools import linkedin_governor as _gov
+
+    # Governor: presupuesto anti-ban de la cuenta (choke point único).
+    _ok, _reason = _gov.can_act(_gov.APPLY)
+    if not _ok:
+        logger.warning(f"[li_moderate] apply bloqueado por governor: {_reason}")
+        return {"success": False, "status": "rate_limited", "message": _reason}
+
     logger.info(f"[li_moderate] Aplicando LinkedIn Easy Apply: {job_url[:80]}...")
-    
+
     context, browser = await _get_linkedin_session()
     page = None
     
@@ -571,10 +582,9 @@ async def _apply_linkedin_easy_apply(
                 await submit_button.click()
                 logger.success("[li_moderate] Aplicación LinkedIn Easy Apply enviada")
         
-        # Actualizar contadores
-        last_app_time = datetime.now()
-        app_count_since_pause += 1
-        
+        # Registrar la acción en el governor (presupuesto de cuenta)
+        _gov.record_action(_gov.APPLY, meta=job_url[:60])
+
         return {
             "success": True,
             "status": "linkedin_easy_apply_submitted",

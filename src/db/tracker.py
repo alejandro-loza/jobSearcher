@@ -1,6 +1,7 @@
 """
 SQLite tracker para jobs, aplicaciones, emails y entrevistas.
 """
+
 import sqlite3
 import json
 import threading
@@ -112,32 +113,130 @@ class JobTracker:
                     created_at TEXT DEFAULT (datetime('now')),
                     FOREIGN KEY (conversation_id) REFERENCES linkedin_conversations(conversation_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS external_apply_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL UNIQUE,
+                    title TEXT,
+                    company TEXT,
+                    location TEXT,
+                    url TEXT,
+                    match_score INTEGER,
+                    ats_type TEXT DEFAULT 'unknown',
+                    priority INTEGER DEFAULT 50,
+                    status TEXT DEFAULT 'pending',
+                    attempts INTEGER DEFAULT 0,
+                    last_attempt_at TEXT,
+                    error_message TEXT,
+                    handled_by TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    completed_at TEXT,
+                    FOREIGN KEY (job_id) REFERENCES jobs(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ext_status ON external_apply_queue(status, priority DESC);
+
+                -- Decisiones pendientes de aprobación manual (survive crashes)
+                -- decision_type: 'job_confirm' | 'recruiter_reply' | 'slot_selection'
+                CREATE TABLE IF NOT EXISTS pending_decisions (
+                    id TEXT PRIMARY KEY,
+                    decision_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    expires_at TEXT
+                );
             """)
             # Migraciones: agregar columnas nuevas si no existen
             self._migrate(conn)
         logger.debug(f"DB inicializada en {self.db_path}")
 
+    # --- PENDING DECISIONS (survive crashes) ---
+
+    def save_pending_decision(self, decision_id: str, decision_type: str, payload: dict, ttl_hours: int = 48):
+        """Persiste una decisión pendiente en SQLite."""
+        from datetime import timedelta
+        expires = (datetime.now() + timedelta(hours=ttl_hours)).isoformat()
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO pending_decisions (id, decision_type, payload, expires_at)
+                   VALUES (?, ?, ?, ?)""",
+                (decision_id, decision_type, json.dumps(payload, default=str), expires),
+            )
+
+    def delete_pending_decision(self, decision_id: str):
+        """Elimina una decisión resuelta o cancelada."""
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM pending_decisions WHERE id = ?", (decision_id,))
+
+    def get_pending_decisions(self, decision_type: str = None) -> List[Dict]:
+        """Carga decisiones pendientes aún no expiradas."""
+        with self._get_conn() as conn:
+            if decision_type:
+                rows = conn.execute(
+                    """SELECT * FROM pending_decisions
+                       WHERE decision_type = ?
+                         AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))
+                       ORDER BY created_at""",
+                    (decision_type,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM pending_decisions
+                       WHERE expires_at IS NULL OR datetime(expires_at) > datetime('now')
+                       ORDER BY created_at""",
+                ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except Exception:
+                pass
+            result.append(d)
+        return result
+
+    def clear_expired_decisions(self):
+        """Limpia decisiones expiradas — llamar en startup."""
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM pending_decisions WHERE datetime(expires_at) < datetime('now')"
+            )
+            if cur.rowcount:
+                logger.info(f"[tracker] {cur.rowcount} decisiones expiradas eliminadas")
+
     def _migrate(self, conn):
         """Agrega columnas nuevas sin romper datos existentes."""
         migrations = [
-            ("applications",        "pipeline_stage",  "TEXT DEFAULT 'applied'"),
-            ("applications",        "verified",        "INTEGER DEFAULT 0"),
-            ("applications",        "notes",           "TEXT DEFAULT ''"),
-            ("applications",        "last_activity",   "TEXT"),
-            ("applications",        "response_date",   "TEXT"),
-            ("applications",        "rejection_reason","TEXT DEFAULT ''"),
-            ("jobs",                "applied_url",     "TEXT DEFAULT ''"),
+            ("applications", "pipeline_stage", "TEXT DEFAULT 'applied'"),
+            ("applications", "verified", "INTEGER DEFAULT 0"),
+            ("applications", "notes", "TEXT DEFAULT ''"),
+            ("applications", "last_activity", "TEXT"),
+            ("applications", "response_date", "TEXT"),
+            ("applications", "rejection_reason", "TEXT DEFAULT ''"),
+            ("jobs", "applied_url", "TEXT DEFAULT ''"),
             # Quién respondió: 'pending' | 'auto' | 'alejandro' | 'skipped'
-            ("emails",              "responded_by",    "TEXT DEFAULT 'pending'"),
-            ("linkedin_messages",   "responded_by",    "TEXT DEFAULT 'pending'"),
+            ("emails", "responded_by", "TEXT DEFAULT 'pending'"),
+            ("linkedin_messages", "responded_by", "TEXT DEFAULT 'pending'"),
             # Application attempt tracking
-            ("applications",        "attempt_count",   "INTEGER DEFAULT 1"),
-            ("applications",        "failure_reason",  "TEXT DEFAULT ''"),
-            ("applications",        "apply_method_detail", "TEXT DEFAULT ''"),
+            ("applications", "attempt_count", "INTEGER DEFAULT 1"),
+            ("applications", "failure_reason", "TEXT DEFAULT ''"),
+            ("applications", "apply_method_detail", "TEXT DEFAULT ''"),
             # Application queue / pipeline health
-            ("jobs",                "being_processed", "INTEGER DEFAULT 0"),
-            ("jobs",                "last_attempt_at", "TEXT"),
-            ("jobs",                "ghosted_at",      "TEXT"),
+            ("jobs", "being_processed", "INTEGER DEFAULT 0"),
+            ("jobs", "last_attempt_at", "TEXT"),
+            ("jobs", "ghosted_at", "TEXT"),
+            # Follow-up cadence tracking
+            ("applications", "followup_count", "INTEGER DEFAULT 0"),
+            ("applications", "last_followup_at", "TEXT"),
+            ("applications", "last_response_at", "TEXT"),
+            ("applications", "last_interview_at", "TEXT"),
+            # ATS type for external portal agent
+            ("jobs", "ats_type", "TEXT DEFAULT 'unknown'"),
+            # Soft-archive: bandera lógica para "empezar fresco" sin borrar datos.
+            # archived=1 saca al job del pipeline activo pero conserva la fila.
+            ("jobs", "archived", "INTEGER DEFAULT 0"),
+            ("jobs", "archived_at", "TEXT"),
+            ("external_apply_queue", "archived", "INTEGER DEFAULT 0"),
+            ("external_apply_queue", "archived_at", "TEXT"),
         ]
         existing = {}
         for table, col, _ in migrations:
@@ -160,8 +259,8 @@ class JobTracker:
                 return False
             conn.execute(
                 """INSERT INTO jobs (id, title, company, location, description,
-                   url, salary, source, match_score, raw_data)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   url, salary, source, match_score, raw_data, ats_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job["id"],
                     job.get("title", ""),
@@ -173,15 +272,79 @@ class JobTracker:
                     job.get("source", ""),
                     job.get("match_score", 0),
                     json.dumps(job),
+                    job.get("ats_type", "unknown"),
                 ),
             )
             return True
 
     def update_job_status(self, job_id: str, status: str):
         with self._get_conn() as conn:
+            conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+
+    def update_job_score(self, job_id: str, score: int):
+        """Persiste el match_score calculado por el LLM (paso scan→score→apply)."""
+        with self._get_conn() as conn:
             conn.execute(
-                "UPDATE jobs SET status = ? WHERE id = ?", (status, job_id)
+                "UPDATE jobs SET match_score = ? WHERE id = ?", (int(score), job_id)
             )
+
+    def get_unscored_jobs(self, limit: int = 40) -> List[Dict[str, Any]]:
+        """
+        Jobs que entraron por scan/discovery pero aún NO tienen score del LLM.
+        Sentinela: match_score = 0 (el LLM nunca devuelve 0 salvo error, así que
+        re-evaluar 0s reintenta fallos transitorios). Prioriza fuentes ATS-api
+        (Greenhouse/Ashby/Lever) porque son las que el external_ats_agent puede
+        aplicar sin riesgo de LinkedIn.
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, title, company, location, description, url, salary,
+                          source, ats_type, match_score
+                   FROM jobs
+                   WHERE status = 'found'
+                     AND COALESCE(match_score, 0) = 0
+                     AND COALESCE(archived, 0) = 0
+                     AND url IS NOT NULL AND url != ''
+                   ORDER BY
+                     CASE WHEN source IN ('greenhouse-api','lever-api','ashby-api')
+                          THEN 0 ELSE 1 END,
+                     found_at DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def archive_all_active(self) -> Dict[str, int]:
+        """
+        Soft-reset del pipeline: marca archived=1 en todas las vacantes actuales
+        (tabla jobs y external_apply_queue) SIN borrar ninguna fila. Reversible con
+        unarchive_all(). Las vacantes archivadas quedan fuera del pipeline activo
+        pero siguen contando para dedup (job_exists), así que no reaparecen.
+        """
+        with self._get_conn() as conn:
+            j = conn.execute(
+                "UPDATE jobs SET archived = 1, archived_at = datetime('now') "
+                "WHERE COALESCE(archived, 0) = 0"
+            ).rowcount
+            e = conn.execute(
+                "UPDATE external_apply_queue SET archived = 1, archived_at = datetime('now') "
+                "WHERE COALESCE(archived, 0) = 0"
+            ).rowcount
+        logger.info(f"[archive] {j} jobs y {e} externos marcados como archived (0 filas borradas)")
+        return {"jobs_archived": j, "external_archived": e}
+
+    def unarchive_all(self) -> Dict[str, int]:
+        """Revierte archive_all_active: vuelve a activar todo lo archivado."""
+        with self._get_conn() as conn:
+            j = conn.execute(
+                "UPDATE jobs SET archived = 0, archived_at = NULL WHERE COALESCE(archived, 0) = 1"
+            ).rowcount
+            e = conn.execute(
+                "UPDATE external_apply_queue SET archived = 0, archived_at = NULL "
+                "WHERE COALESCE(archived, 0) = 1"
+            ).rowcount
+        logger.info(f"[archive] revertido: {j} jobs y {e} externos reactivados")
+        return {"jobs_unarchived": j, "external_unarchived": e}
 
     def get_job(self, job_id: str) -> Optional[Dict]:
         with self._get_conn() as conn:
@@ -191,7 +354,9 @@ class JobTracker:
     def get_jobs_by_status(self, status: str) -> List[Dict]:
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE status = ? ORDER BY found_at DESC", (status,)
+                "SELECT * FROM jobs WHERE status = ? AND COALESCE(archived, 0) = 0 "
+                "ORDER BY found_at DESC",
+                (status,),
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -205,15 +370,66 @@ class JobTracker:
     def job_exists(self, job_id: str) -> bool:
         with self._get_conn() as conn:
             return bool(
+                conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            )
+
+    def job_url_exists(self, url: str) -> bool:
+        """Dedup por URL — evita guardar el mismo job desde distintas fuentes."""
+        if not url:
+            return False
+        with self._get_conn() as conn:
+            return bool(
                 conn.execute(
-                    "SELECT 1 FROM jobs WHERE id = ?", (job_id,)
+                    "SELECT 1 FROM jobs WHERE url = ? LIMIT 1", (url,)
                 ).fetchone()
             )
 
     # --- APPLICATION QUEUE (application_agent) ---
 
+    # Keywords para filtrar jobs por ubicación (CDMX / remoto para México)
+    _CDMX_KEYWORDS = (
+        "mexico city", "ciudad de mexico", "ciudad de méxico", "cdmx",
+        "polanco", "cuajimalpa", "álvaro obregón", "alvaro obregon",
+        "miguel hidalgo", "coyoacán", "benito juárez",
+    )
+    _REMOTE_KEYWORDS = ("remote", "remoto", "remote - mexico", "remote mexico", "remote, mexico")
+    _EXCLUDE_LOCATIONS = (
+        "remote, us", "remote us", "remote, united states",
+        "united states", "canada", "singapore", "united kingdom",
+        "ireland", "germany", "spain", "romania", "hong kong",
+    )
+
+    def _is_cdmx_or_remote_mx(self, location: Optional[str]) -> bool:
+        """
+        True SOLO si:
+          - Ubicación explícita en CDMX / zona metropolitana
+          - Remoto con país México/LatAm explícito
+          - Sin location (fallback permisivo — el scanner filtra por empresa)
+
+        Rechaza: Remote, Remote US, Remote Europe, Remote Canada, etc.
+        """
+        if not location:
+            return True  # sin location → el scanner ya filtra por empresa
+        low = location.lower().strip()
+        if low in ("n/a", "na", "not specified", ""):
+            return True
+        # Excluir explícitamente ubicaciones fuera de México
+        if any(excl in low for excl in self._EXCLUDE_LOCATIONS):
+            return False
+        # Permitir CDMX explícita
+        if any(kw in low for kw in self._CDMX_KEYWORDS):
+            return True
+        # Permitir remoto SOLO si menciona México/LatAm explícitamente
+        if any(kw in low for kw in self._REMOTE_KEYWORDS):
+            if "mexico" in low or "méxico" in low or "latam" in low or "latin america" in low:
+                return True
+            # "Remote" genérico sin país → RECHAZADO (podría ser USA)
+        return False
+
     def get_application_queue(
-        self, min_score: int = 75, max_age_days: int = 14, limit: int = 50
+        self, min_score: int = 75, max_age_days: int = 14, limit: int = 50,
+        easy_apply_only: bool = True,
+        cdmx_only: bool = True,
     ) -> List[Dict]:
         """
         Retorna jobs listos para aplicar, ordenados por prioridad:
@@ -226,20 +442,133 @@ class JobTracker:
           - score >= min_score
           - found_at dentro de max_age_days
           - tiene URL (sin URL no se puede aplicar automáticamente)
+          - si easy_apply_only=True: solo jobs con easy_apply=True en raw_data
+          - si cdmx_only=True: solo jobs en CDMX, remoto México, o sin location
         """
         with self._get_conn() as conn:
             rows = conn.execute(
                 """SELECT * FROM jobs
                    WHERE status = 'found'
+                     AND COALESCE(archived, 0) = 0
                      AND COALESCE(being_processed, 0) = 0
                      AND COALESCE(match_score, 0) >= ?
                      AND url IS NOT NULL AND url != ''
                      AND datetime(found_at) >= datetime('now', ?)
                    ORDER BY match_score DESC, found_at DESC
                    LIMIT ?""",
-                (min_score, f"-{max_age_days} days", limit),
+                (min_score, f"-{max_age_days} days", limit * 5),
+            ).fetchall()
+
+            import json as _json
+            easy_apply_jobs = []
+            external_jobs = []
+            skipped_location = []
+            for r in rows:
+                d = dict(r)
+                # Filtro de ubicación
+                if cdmx_only and not self._is_cdmx_or_remote_mx(d.get("location")):
+                    skipped_location.append(d)
+                    continue
+                # Filtro Easy Apply
+                try:
+                    raw = _json.loads(d.get("raw_data") or "{}")
+                except Exception:
+                    raw = {}
+                if easy_apply_only:
+                    if raw.get("easy_apply"):
+                        easy_apply_jobs.append(d)
+                    else:
+                        external_jobs.append(d)
+                else:
+                    easy_apply_jobs.append(d)
+
+            # Marcar jobs fuera de CDMX como skip (no volverlos a procesar)
+            if skipped_location:
+                self._mark_out_of_scope(skipped_location)
+
+            # Enrutar externos a external_apply_queue
+            if external_jobs:
+                self._enqueue_externals(external_jobs)
+
+            return easy_apply_jobs[:limit]
+
+    def _mark_out_of_scope(self, jobs: List[Dict]) -> int:
+        """Marca jobs fuera de CDMX como skip para que no vuelvan a la cola."""
+        if not jobs:
+            return 0
+        with self._get_conn() as conn:
+            ids = [j["id"] for j in jobs]
+            placeholders = ",".join(["?"] * len(ids))
+            conn.execute(
+                f"UPDATE jobs SET status='skip_location' WHERE id IN ({placeholders}) AND status='found'",
+                ids,
+            )
+        logger.info(f"[queue] {len(jobs)} jobs marcados como skip_location (fuera de CDMX/remoto MX)")
+        return len(jobs)
+
+    def _enqueue_externals(self, jobs: List[Dict]) -> int:
+        """Mueve jobs externos a external_apply_queue para procesamiento manual/Antigravity."""
+        if not jobs:
+            return 0
+        queued = 0
+        with self._get_conn() as conn:
+            for j in jobs:
+                url_lower = (j.get("url") or "").lower()
+                ats = "unknown"
+                for name, patterns in {
+                    "workday": ["myworkday.com", "workday.com"],
+                    "greenhouse": ["boards.greenhouse.io", "grnh.se"],
+                    "lever": ["jobs.lever.co"],
+                    "ashby": ["jobs.ashbyhq.com"],
+                    "linkedin_external": ["linkedin.com/jobs"],
+                }.items():
+                    if any(p in url_lower for p in patterns):
+                        ats = name
+                        break
+                try:
+                    cur = conn.execute(
+                        """INSERT OR IGNORE INTO external_apply_queue
+                           (job_id, title, company, location, url, match_score, ats_type, priority)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (j["id"], j.get("title"), j.get("company"), j.get("location"),
+                         j.get("url"), j.get("match_score", 0), ats, j.get("match_score", 50)),
+                    )
+                    if cur.rowcount:
+                        queued += 1
+                        # Mark job as deferred (no tocamos 'found' para dedup del scanner)
+                        conn.execute(
+                            "UPDATE jobs SET status=?, ats_type=? WHERE id=?",
+                            ("external_deferred", ats, j["id"]),
+                        )
+                except Exception as e:
+                    logger.warning(f"[queue] fallo encolando external {j['id']}: {e}")
+        if queued:
+            logger.info(f"[queue] {queued} jobs externos → external_apply_queue")
+        return queued
+
+    def get_external_queue(self, min_score: int = 75, limit: int = 100) -> List[Dict]:
+        """Retorna jobs externos pendientes para Antigravity/manual."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM external_apply_queue
+                   WHERE status = 'pending'
+                     AND COALESCE(archived, 0) = 0
+                     AND match_score >= ?
+                   ORDER BY priority DESC, match_score DESC
+                   LIMIT ?""",
+                (min_score, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def mark_external_done(self, job_id: str, handled_by: str, status: str = "completed"):
+        """Marca un job externo como procesado."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """UPDATE external_apply_queue
+                   SET status = ?, handled_by = ?, completed_at = datetime('now')
+                   WHERE job_id = ?""",
+                (status, handled_by, job_id),
+            )
 
     def lock_job_for_processing(self, job_id: str) -> bool:
         """
@@ -261,9 +590,7 @@ class JobTracker:
     def release_job_lock(self, job_id: str):
         """Libera el lock de processing."""
         with self._get_conn() as conn:
-            conn.execute(
-                "UPDATE jobs SET being_processed = 0 WHERE id = ?", (job_id,)
-            )
+            conn.execute("UPDATE jobs SET being_processed = 0 WHERE id = ?", (job_id,))
 
     def release_stale_locks(self, max_age_minutes: int = 30):
         """
@@ -280,6 +607,58 @@ class JobTracker:
             )
             if cur.rowcount:
                 logger.warning(f"[tracker] Liberados {cur.rowcount} locks stale")
+
+    def cleanup_stale_jobs(self, max_age_days: int = 14) -> Dict[str, int]:
+        """
+        Elimina jobs stale (status='found', >max_age_days) que nunca se aplicaron.
+        Solo borra jobs sin aplicaciones asociadas para no perder historial.
+        Retorna conteo de jobs eliminados y aplicaciones huérfanas limpiadas.
+        """
+        with _db_lock:
+            with self._get_conn() as conn:
+                stale_ids = conn.execute(
+                    """SELECT j.id FROM jobs j
+                       LEFT JOIN applications a ON a.job_id = j.id
+                       WHERE j.status = 'found'
+                         AND datetime(j.found_at) < datetime('now', ?)
+                         AND a.id IS NULL""",
+                    (f"-{max_age_days} days",),
+                ).fetchall()
+                stale_ids = [r[0] for r in stale_ids]
+
+                if not stale_ids:
+                    logger.info("[tracker] cleanup: no stale jobs found")
+                    return {"deleted": 0}
+
+                placeholders = ",".join("?" * len(stale_ids))
+                conn.execute(
+                    f"DELETE FROM jobs WHERE id IN ({placeholders})", stale_ids
+                )
+                logger.info(
+                    f"[tracker] cleanup: deleted {len(stale_ids)} stale jobs (>{max_age_days}d)"
+                )
+                return {"deleted": len(stale_ids)}
+
+    def mark_stale_as_expired(self, max_age_days: int = 14) -> Dict[str, int]:
+        """
+        Marca jobs stale como 'expired' en vez de borrarlos (preserva historial).
+        Jobs con status='found' y found_at > max_age_days se marcan 'expired'.
+        """
+        with _db_lock:
+            with self._get_conn() as conn:
+                cur = conn.execute(
+                    """UPDATE jobs
+                       SET status = 'expired'
+                       WHERE status = 'found'
+                         AND datetime(found_at) < datetime('now', ?)""",
+                    (f"-{max_age_days} days",),
+                )
+                count = cur.rowcount
+                if count:
+                    logger.info(
+                        f"[tracker] marked {count} stale jobs as 'expired' (>{max_age_days}d)"
+                    )
+                return {"marked_expired": count}
 
     def count_applications_today(self) -> int:
         """Número de aplicaciones exitosas del día actual (para rate limit diario)."""
@@ -434,14 +813,20 @@ class JobTracker:
     #   offer            - recibió oferta
 
     def save_application(
-        self, job_id: str, method: str = "linkedin", cover_letter: str = "",
-        status: str = "applied", failure_reason: str = "", method_detail: str = "",
+        self,
+        job_id: str,
+        method: str = "linkedin",
+        cover_letter: str = "",
+        status: str = "applied",
+        failure_reason: str = "",
+        method_detail: str = "",
     ) -> int:
         with _db_lock:
             with self._get_conn() as conn:
                 # Check if there's already an application for this job
                 existing = conn.execute(
-                    "SELECT id, attempt_count FROM applications WHERE job_id = ?", (job_id,)
+                    "SELECT id, attempt_count FROM applications WHERE job_id = ?",
+                    (job_id,),
                 ).fetchone()
 
                 if existing:
@@ -453,7 +838,14 @@ class JobTracker:
                                apply_method_detail=?, attempt_count=?,
                                last_activity=datetime('now')
                            WHERE job_id=?""",
-                        (status, method, failure_reason, method_detail, attempt, job_id),
+                        (
+                            status,
+                            method,
+                            failure_reason,
+                            method_detail,
+                            attempt,
+                            job_id,
+                        ),
                     )
                     app_id = existing[0]
                 else:
@@ -462,7 +854,14 @@ class JobTracker:
                            (job_id, method, cover_letter, status, failure_reason,
                             apply_method_detail, attempt_count, last_activity)
                            VALUES (?, ?, ?, ?, ?, ?, 1, datetime('now'))""",
-                        (job_id, method, cover_letter, status, failure_reason, method_detail),
+                        (
+                            job_id,
+                            method,
+                            cover_letter,
+                            status,
+                            failure_reason,
+                            method_detail,
+                        ),
                     )
                     app_id = cursor.lastrowid
 
@@ -479,10 +878,14 @@ class JobTracker:
                     "rejected": "rejected",
                 }
                 job_status = JOB_STATUS_MAP.get(status, "found")
-                conn.execute("UPDATE jobs SET status=? WHERE id=?", (job_status, job_id))
+                conn.execute(
+                    "UPDATE jobs SET status=? WHERE id=?", (job_status, job_id)
+                )
                 return app_id
 
-    def update_application_status(self, job_id: str, status: str, failure_reason: str = ""):
+    def update_application_status(
+        self, job_id: str, status: str, failure_reason: str = ""
+    ):
         with self._get_conn() as conn:
             conn.execute(
                 """UPDATE applications
@@ -501,7 +904,9 @@ class JobTracker:
             }
             job_status = JOB_STATUS_MAP.get(status)
             if job_status:
-                conn.execute("UPDATE jobs SET status=? WHERE id=?", (job_status, job_id))
+                conn.execute(
+                    "UPDATE jobs SET status=? WHERE id=?", (job_status, job_id)
+                )
 
     def get_failed_applications(self) -> List[Dict]:
         """Jobs donde falló la aplicación automática."""
@@ -528,7 +933,7 @@ class JobTracker:
             return stats
 
     def get_applications_pending_followup(self) -> List[Dict]:
-        """Jobs aplicados hace mas de FOLLOWUP_DAYS sin respuesta."""
+        """Jobs aplicados hace mas de FOLLOWUP_DAYS sin respuesta (legacy)."""
         with self._get_conn() as conn:
             rows = conn.execute(
                 f"""SELECT j.*, a.applied_at, a.id as app_id
@@ -539,6 +944,58 @@ class JobTracker:
                     AND julianday('now') - julianday(a.applied_at) >= {settings.followup_days}"""
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_applications_with_cadence_context(self) -> List[Dict]:
+        """
+        Retorna aplicaciones activas con los campos que necesita followup_cadence.decide():
+        status, applied_at, last_followup_at, last_response_at, last_interview_at,
+        followup_count. Incluye datos del job para el master_agent.
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT j.*, a.applied_at, a.id as app_id, a.status,
+                          a.followup_count, a.last_followup_at,
+                          a.last_response_at, a.last_interview_at,
+                          (SELECT GROUP_CONCAT(from_address)
+                             FROM emails e WHERE e.job_id = j.id) AS emails_in_job
+                   FROM jobs j
+                   JOIN applications a ON j.id = a.job_id
+                   WHERE a.status IN ('applied', 'responded', 'interview')"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def record_followup_sent(self, app_id: int) -> None:
+        """Registra un follow-up enviado: incrementa contador + fecha."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """UPDATE applications
+                   SET followup_count = COALESCE(followup_count, 0) + 1,
+                       last_followup_at = datetime('now')
+                   WHERE id = ?""",
+                (app_id,),
+            )
+
+    def record_response_received(self, job_id: str) -> None:
+        """Marca que llegó respuesta del reclutador para este job."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """UPDATE applications
+                   SET status = 'responded',
+                       last_response_at = datetime('now')
+                   WHERE job_id = ? AND status = 'applied'""",
+                (job_id,),
+            )
+
+    def record_interview_completed(self, job_id: str) -> None:
+        """Marca que se completó una entrevista para este job."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """UPDATE applications
+                   SET status = 'interview',
+                       last_interview_at = datetime('now')
+                   WHERE job_id = ?""",
+                (job_id,),
+            )
 
     # --- EMAILS ---
 
@@ -637,15 +1094,15 @@ class JobTracker:
     # --- PIPELINE ---
 
     PIPELINE_STAGES = [
-        "applied",          # aplicamos
-        "viewed",           # empresa vio la aplicación
-        "response",         # respondieron (positivo/neutral)
-        "interview",        # entrevista agendada
-        "technical_test",   # prueba técnica
-        "offer",            # oferta recibida
-        "accepted",         # aceptamos
-        "rejected",         # rechazados
-        "ghosted",          # sin respuesta tras followup
+        "applied",  # aplicamos
+        "viewed",  # empresa vio la aplicación
+        "response",  # respondieron (positivo/neutral)
+        "interview",  # entrevista agendada
+        "technical_test",  # prueba técnica
+        "offer",  # oferta recibida
+        "accepted",  # aceptamos
+        "rejected",  # rechazados
+        "ghosted",  # sin respuesta tras followup
     ]
 
     def advance_pipeline(self, job_id: str, stage: str, notes: str = ""):
@@ -660,11 +1117,11 @@ class JobTracker:
                 )
                 # Sincronizar status en jobs también
                 job_status_map = {
-                    "interview":      "interview_scheduled",
-                    "offer":          "offer_received",
-                    "accepted":       "accepted",
-                    "rejected":       "rejected",
-                    "ghosted":        "ghosted",
+                    "interview": "interview_scheduled",
+                    "offer": "offer_received",
+                    "accepted": "accepted",
+                    "rejected": "rejected",
+                    "ghosted": "ghosted",
                 }
                 if stage in job_status_map:
                     conn.execute(
@@ -699,11 +1156,15 @@ class JobTracker:
                    FROM applications
                    GROUP BY pipeline_stage"""
             ).fetchall()
-            stages = {r["pipeline_stage"]: {"total": r["n"], "verified": r["verified_n"] or 0}
-                      for r in rows}
+            stages = {
+                r["pipeline_stage"]: {"total": r["n"], "verified": r["verified_n"] or 0}
+                for r in rows
+            }
             # Verificados vs no verificados
             total = conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
-            verified = conn.execute("SELECT COUNT(*) FROM applications WHERE verified=1").fetchone()[0]
+            verified = conn.execute(
+                "SELECT COUNT(*) FROM applications WHERE verified=1"
+            ).fetchone()[0]
             return {
                 "by_stage": stages,
                 "total_applications": total,
@@ -809,7 +1270,11 @@ class JobTracker:
             existing = conn.execute(
                 """SELECT id FROM linkedin_messages
                    WHERE conversation_id=? AND linkedin_timestamp=? AND from_me=?""",
-                (msg["conversation_id"], msg.get("linkedin_timestamp", 0), msg.get("from_me", 0)),
+                (
+                    msg["conversation_id"],
+                    msg.get("linkedin_timestamp", 0),
+                    msg.get("from_me", 0),
+                ),
             ).fetchone()
             if existing:
                 return None
@@ -839,7 +1304,9 @@ class JobTracker:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_conversation_history(self, conversation_id: str, limit: int = 20) -> List[Dict]:
+    def get_conversation_history(
+        self, conversation_id: str, limit: int = 20
+    ) -> List[Dict]:
         """Mensajes de una conversación ordenados cronológicamente."""
         with self._get_conn() as conn:
             rows = conn.execute(
@@ -851,7 +1318,9 @@ class JobTracker:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def update_conversation_state(self, conversation_id: str, state: str, notes: str = ""):
+    def update_conversation_state(
+        self, conversation_id: str, state: str, notes: str = ""
+    ):
         """Actualiza estado de una conversación."""
         with self._get_conn() as conn:
             if notes:
@@ -893,7 +1362,9 @@ class JobTracker:
                 (responded_by, email_id),
             )
 
-    def set_linkedin_message_responded_by(self, message_id: int, responded_by: str) -> None:
+    def set_linkedin_message_responded_by(
+        self, message_id: int, responded_by: str
+    ) -> None:
         """Marca quién respondió este mensaje LinkedIn. Valores: auto|alejandro|pending|skipped"""
         assert responded_by in ("auto", "alejandro", "pending", "skipped")
         with self._get_conn() as conn:
@@ -902,7 +1373,9 @@ class JobTracker:
                 (responded_by, message_id),
             )
 
-    def get_last_incoming_linkedin_message_id(self, conversation_id: str) -> Optional[int]:
+    def get_last_incoming_linkedin_message_id(
+        self, conversation_id: str
+    ) -> Optional[int]:
         """Retorna el ID del último mensaje entrante (from_me=0) en una conversación."""
         with self._get_conn() as conn:
             row = conn.execute(
@@ -916,13 +1389,16 @@ class JobTracker:
     def record_our_reply(self, conversation_id: str, text: str):
         """Registra un mensaje enviado por nosotros."""
         import time as _time
+
         ts = int(_time.time() * 1000)
-        self.save_linkedin_message({
-            "conversation_id": conversation_id,
-            "message_text": text,
-            "from_me": True,
-            "linkedin_timestamp": ts,
-        })
+        self.save_linkedin_message(
+            {
+                "conversation_id": conversation_id,
+                "message_text": text,
+                "from_me": True,
+                "linkedin_timestamp": ts,
+            }
+        )
         # Marcar como procesado inmediatamente
         with self._get_conn() as conn:
             conn.execute(
