@@ -126,6 +126,18 @@ def evaluate_job_match(
     Returns:
         Tuple (score 0-100, justificación breve)
     """
+    # Pre-gate determinista (cero tokens): si la ubicación no permite trabajar
+    # desde México ("Remote U.S.", "Toronto", "Remote - Estonia"…), no vale la
+    # pena ni evaluarla — Alejandro trabaja desde CDMX.
+    from src.tools.portal_scanner import location_allows_mexico
+
+    _loc = job.get("location", "")
+    if not location_allows_mexico(_loc):
+        return 15, (
+            f"[Ubicación no trabajable desde México: '{_loc}'] La vacante restringe "
+            "la contratación a otro país/región."
+        )
+
     # Build full CV context for accurate evaluation
     experience_text = ""
     for exp in resume.get("work_experience", []):
@@ -167,6 +179,12 @@ EMPLEO ACTUAL DE ALEJANDRO (línea base que la vacante DEBE superar):
 - Modalidad: {CURRENT_JOB['modalidad']}
 
 CRITERIOS DE EVALUACIÓN:
+- ELEGIBILIDAD GEOGRÁFICA (CRITERIO DURO): Alejandro vive y trabaja DESDE México (CDMX).
+  La vacante SOLO sirve si permite trabajar desde México: presencial/híbrida en México,
+  o remota que contrate en México/Latam. Si la descripción indica que el remoto está
+  restringido a otro país ("must be located in the US", "US work authorization",
+  "EU-based only", visa/relocation requerida, etc.) → workable_from_mexico=false y
+  score MÁXIMO 20. Ante duda razonable, asume que sí es elegible pero menciónalo en reasons.
 - El candidato busca roles Sr Backend/Full Stack con Java, Spring Boot, Microservices, Cloud
 - Prefiere remoto o híbrido en CDMX
 - NO le interesan: frontend puro, QA, data science, DevOps/SRE puro, SAP, Salesforce
@@ -195,6 +213,7 @@ Reglas de tope por esta comparación:
 Responde SOLO con JSON válido:
 {{
   "score": 85,
+  "workable_from_mexico": true,
   "better_than_current": true,
   "reasons": "Explicación breve incluyendo por qué es (o no) mejor opción que el empleo actual (máx 2 oraciones)",
   "missing_skills": ["skill1", "skill2"],
@@ -212,6 +231,17 @@ Responde SOLO con JSON válido:
         score = int(result.get("score", 0) or 0)
         reasons = result.get("reasons", "")
         better = result.get("better_than_current")
+        workable = result.get("workable_from_mexico")
+
+        # Red de seguridad determinista: si el LLM detectó (por la descripción)
+        # que no se puede trabajar desde México, topamos a 20 aunque haya dado más.
+        if workable is False and score > 20:
+            logger.info(
+                f"[match] '{job.get('title','')}' @ {job.get('company','')}: "
+                f"no trabajable desde México → tope 20 (LLM dio {score})"
+            )
+            score = 20
+            reasons = f"[No trabajable desde México] {reasons}"
 
         # Red de seguridad determinista: si no supera al empleo actual, topamos el
         # score aunque el LLM lo haya puesto alto. Solo aplica si el modelo devolvió

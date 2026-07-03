@@ -189,18 +189,59 @@ def build_title_filter(cfg: dict) -> Callable[[str], bool]:
     return check
 
 
+# Ubicaciones que permiten trabajar desde México (whitelist explícita).
+_MX_OK = [
+    "mexico",
+    "méxico",
+    "cdmx",
+    "ciudad de méxico",
+    "polanco",
+    "monterrey",
+    "guadalajara",
+    "latam",
+    "latin america",
+    "americas",
+    "worldwide",
+    "global",
+    "anywhere",
+]
+_REMOTE_TOKENS = ("remote", "remoto")
+
+
+def location_allows_mexico(location: str) -> bool:
+    """
+    True si la ubicación permite trabajar DESDE México.
+
+    Regla: whitelist México/Latam/global pasa directo. "Remote"/"Remoto" a secas
+    (sin calificativo) pasa — el LLM decide con la descripción. Pero "Remote" +
+    cualquier calificativo que NO sea whitelist ("Remote U.S.", "Remote - Estonia",
+    "Remote (US)") se rechaza: ese calificativo restringe el país de contratación.
+    Ubicaciones on-site/híbridas fuera de México también se rechazan.
+    """
+    low = (location or "").strip().lower()
+    if not low or low in ("n/a", "na", "not specified"):
+        return True  # sin dato → lo decide el scorer con la descripción
+    if any(k in low for k in _MX_OK):
+        return True
+    rem = low
+    for t in _REMOTE_TOKENS:
+        rem = rem.replace(t, " ")
+    rem = re.sub(r"[\s\-–—,;:/()\[\]\.]+", " ", rem).strip()
+    if not rem:
+        return True  # "Remote" puro, sin restricción explícita
+    return False  # "Remote U.S.", "Remote - Israel", "Toronto", "Hybrid London"…
+
+
 def build_location_filter(cfg: dict) -> Callable[[str], bool]:
-    positive = [k.lower() for k in (cfg or {}).get("positive", [])]
-    negative = [k.lower() for k in (cfg or {}).get("negative", [])]
-    mexico_kw = [
-        "mexico",
-        "mexico city",
-        "cdmx",
-        "polanco",
-        "monterrey",
-        "guadalajara",
-        "latam",
+    # "remote"/"remoto" como positivo del YAML causaba fuga: hacía match con
+    # "Remote U.S.", "Remote - Estonia", etc. La lógica remota vive ahora en
+    # location_allows_mexico(); los positivos del YAML quedan para ciudades extra.
+    positive = [
+        k.lower()
+        for k in (cfg or {}).get("positive", [])
+        if k.lower() not in _REMOTE_TOKENS
     ]
+    negative = [k.lower() for k in (cfg or {}).get("negative", [])]
 
     def check(location: str) -> bool:
         low = (location or "").lower()
@@ -208,9 +249,9 @@ def build_location_filter(cfg: dict) -> Callable[[str], bool]:
             return True
         if any(k in low for k in negative):
             return False
-        if any(k in low for k in mexico_kw):
+        if any(k in low for k in positive):
             return True
-        return False
+        return location_allows_mexico(location)
 
     return check
 

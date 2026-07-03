@@ -1,0 +1,413 @@
+# Portal Scanner — jobSearcher
+#
+# Escanea APIs públicas de Greenhouse/Ashby/Lever sin gastar tokens de LLM.
+# Copia este archivo a config/portals.yml y personaliza.
+#
+# Uso:
+#   venv/bin/python -m src.tools.portal_scanner              # scan completo
+#   venv/bin/python -m src.tools.portal_scanner --dry-run    # preview
+
+# ─── Filtro de títulos ───────────────────────────────────────────────
+# At least 1 positive match AND 0 negatives (case-insensitive).
+
+title_filter:
+  positive:
+    - "Java"
+    - "Spring"
+    - "Backend"
+    - "Back-end"
+    - "Back End"
+    - "Full Stack"
+    - "Fullstack"
+    - "Full-stack"
+    - "Software Engineer"
+    - "Software Developer"
+    - "Senior Engineer"
+    - "Staff Engineer"
+    - "Platform Engineer"
+    - "Cloud Engineer"
+    - "Microservices"
+
+  negative:
+    - "Intern"
+    - "Internship"
+    - "Becario"
+    - "Junior"
+    - "Frontend Only"
+    - "iOS"
+    - "Android"
+    - "Mobile Developer"
+    - "Data Scientist"
+    - "Data Engineer"
+    - "ML Engineer"
+    - "Machine Learning"
+    - "DevRel"
+    - "Sales"
+    - "Marketing"
+    - "Recruiter"
+    - "Designer"
+    - "QA Tester"
+    - "Game Developer"
+    - ".NET"
+    - "C#"
+    - "PHP"
+    - "Ruby on Rails"
+    - "Rust"
+    - "Golang"
+    - "Go Developer"
+    - "Embedded"
+    - "Firmware"
+
+# ─── Filtro de ubicación ───────────────────────────────────────────
+# Solo se guardan jobs que coincidan con al menos 1 location_positive
+# O que tengan location_positive en "Remote" (genérico, sin país restrictivo).
+# Jobs con ubicaciones que coincidan con location_negative se descartan.
+
+location_filter:
+  positive:
+    - "Mexico"
+    - "México"
+    - "Mexico City"
+    - "CDMX"
+    - "Ciudad de México"
+    - "Polanco"
+    - "Monterrey"
+    - "Guadalajara"
+    - "Remote"
+    - "Latam"
+    - "Remoto"
+  negative:
+    - "India"
+    - "Brazil"
+    - "Sao Paulo"
+    - "Bengaluru"
+    - "Singapore"
+    - "China"
+    - "Germany"
+    - "Romania"
+    - "Ireland"
+    - "London"
+    - "Berlin"
+    # EEUU/Canadá — "Remote - US" etc. no contratan en México
+    - "United States"
+    - "US Only"
+    - "US-based"
+    - "Remote - US"
+    - "Remote, US"
+    - "Remote (US"
+    - "San Francisco"
+    - "New York"
+    - "Seattle"
+    - "Austin"
+    - "Chicago"
+    - "Boston"
+    - "Los Angeles"
+    - "Denver"
+    - "Washington"
+    - "Atlanta"
+    - "Miami"
+    - "Canada"
+    - "Toronto"
+    - "Vancouver"
+    # Europa / otros
+    - "Poland"
+    - "Portugal"
+    - "Spain"
+    - "Netherlands"
+    - "Amsterdam"
+    - "Paris"
+    - "Dublin"
+    - "Tel Aviv"
+    - "Tokyo"
+    - "Japan"
+    - "Australia"
+    - "Sydney"
+    - "Buenos Aires"
+    - "Bogota"
+    - "Bogotá"
+
+# ─── Empresas ────────────────────────────────────────────────────────
+# careers_url debe apuntar a Greenhouse / Ashby / Lever para que funcione.
+# Si la empresa usa Workday/Taleo/SAP, usa JobSpy normal (no portal scanner).
+
+tracked_companies:
+  # --- Greenhouse (verificados 2026-05-29) ---
+  - name: "Stripe"
+    careers_url: "https://boards.greenhouse.io/stripe"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Nubank"
+    careers_url: "https://boards.greenhouse.io/nubank"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "GitLab"
+    careers_url: "https://boards.greenhouse.io/gitlab"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Doordash"
+    careers_url: "https://boards.greenhouse.io/doordashusa"  # slug corregido
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Airbnb"
+    careers_url: "https://boards.greenhouse.io/airbnb"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Anthropic"
+    careers_url: "https://boards.greenhouse.io/anthropic"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Bitso"
+    careers_url: "https://boards.greenhouse.io/bitso"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Wizeline"
+    careers_url: "https://boards.greenhouse.io/wizeline"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Databricks"
+    careers_url: "https://boards.greenhouse.io/databricks"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Temporal Technologies"
+    careers_url: "https://boards.greenhouse.io/temporaltechnologies"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Datadog"
+    careers_url: "https://boards.greenhouse.io/datadog"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Figma"
+    careers_url: "https://boards.greenhouse.io/figma"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Twilio"
+    careers_url: "https://boards.greenhouse.io/twilio"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Brex"
+    careers_url: "https://boards.greenhouse.io/brex"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Mercury"
+    careers_url: "https://boards.greenhouse.io/mercury"
+    ats_type: "greenhouse"
+    enabled: true
+
+  # --- Ashby (verificados 2026-05-29) ---
+  - name: "Ramp"
+    careers_url: "https://jobs.ashbyhq.com/ramp"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Linear"
+    careers_url: "https://jobs.ashbyhq.com/linear"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Vercel"
+    careers_url: "https://jobs.ashbyhq.com/vercel"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Deel"
+    careers_url: "https://jobs.ashbyhq.com/deel"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Notion"
+    careers_url: "https://jobs.ashbyhq.com/notion"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Cursor"
+    careers_url: "https://jobs.ashbyhq.com/cursor"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Anyscale"
+    careers_url: "https://jobs.ashbyhq.com/anyscale"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Runway"
+    careers_url: "https://jobs.ashbyhq.com/runway-ml"
+    ats_type: "ashby"
+    enabled: true
+
+  # --- Lever (verificados 2026-05-29) ---
+  - name: "Plaid"
+    careers_url: "https://jobs.lever.co/plaid"
+    ats_type: "lever"
+    enabled: true
+  - name: "Netflix"
+    careers_url: "https://jobs.lever.co/netflix"
+    ats_type: "lever"
+    enabled: true
+
+  - name: "Coinbase"
+    careers_url: "https://boards.greenhouse.io/coinbase"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Dropbox"
+    careers_url: "https://boards.greenhouse.io/dropbox"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Discord"
+    careers_url: "https://boards.greenhouse.io/discord"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Robinhood"
+    careers_url: "https://boards.greenhouse.io/robinhood"  # slug corregido (verificado 2026-07-03)
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Chime"
+    careers_url: "https://boards.greenhouse.io/chime"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Konfio"
+    careers_url: "https://boards.greenhouse.io/konfio"
+    ats_type: "greenhouse"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "HubSpot"
+    careers_url: "https://boards.greenhouse.io/hubspot"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Shopify"
+    careers_url: "https://boards.greenhouse.io/shopify"
+    ats_type: "greenhouse"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "Duolingo"
+    careers_url: "https://boards.greenhouse.io/duolingo"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Gusto"
+    careers_url: "https://boards.greenhouse.io/gusto"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Carta"
+    careers_url: "https://boards.greenhouse.io/carta"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Reddit"
+    careers_url: "https://boards.greenhouse.io/reddit"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Faire"
+    careers_url: "https://boards.greenhouse.io/faire"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Checkr"
+    careers_url: "https://boards.greenhouse.io/checkr"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Lattice"
+    careers_url: "https://boards.greenhouse.io/lattice"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Kavak"
+    careers_url: "https://jobs.lever.co/kavak"  # usa Lever, no Greenhouse (verificado 2026-07-03)
+    ats_type: "lever"
+    enabled: true
+  - name: "Tiendanube"
+    careers_url: "https://boards.greenhouse.io/tiendanube"
+    ats_type: "greenhouse"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "Lyft"
+    careers_url: "https://boards.greenhouse.io/lyft"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Clara"
+    careers_url: "https://boards.greenhouse.io/clara"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Incode"
+    careers_url: "https://boards.greenhouse.io/incode"
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Benchling"
+    careers_url: "https://jobs.ashbyhq.com/benchling"  # migrado a Ashby (verificado 2026-07-03)
+    ats_type: "ashby"
+    enabled: true
+  - name: "Persona"
+    careers_url: "https://jobs.ashbyhq.com/persona"  # migrado a Ashby (verificado 2026-07-03)
+    ats_type: "ashby"
+    enabled: true
+
+  # --- Ashby — nuevas empresas ---
+  - name: "Rippling"
+    careers_url: "https://jobs.ashbyhq.com/rippling"
+    ats_type: "ashby"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "Retool"
+    careers_url: "https://jobs.ashbyhq.com/retool"
+    ats_type: "ashby"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "dbt Labs"
+    careers_url: "https://jobs.ashbyhq.com/dbtlabs"
+    ats_type: "ashby"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "Scale AI"
+    careers_url: "https://boards.greenhouse.io/scaleai"  # usa Greenhouse, no Ashby (verificado 2026-07-03)
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "WorkOS"
+    careers_url: "https://jobs.ashbyhq.com/workos"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Supabase"
+    careers_url: "https://jobs.ashbyhq.com/supabase"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Vanta"
+    careers_url: "https://jobs.ashbyhq.com/vanta"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Hightouch"
+    careers_url: "https://jobs.ashbyhq.com/hightouch"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Modal"
+    careers_url: "https://jobs.ashbyhq.com/modal"
+    ats_type: "ashby"
+    enabled: true
+  - name: "Neon"
+    careers_url: "https://jobs.lever.co/neon"  # slug 'neon' en Lever (verificado 2026-07-03)
+    ats_type: "lever"
+    enabled: true
+
+  # --- Lever — nuevas empresas ---
+  - name: "Coursera"
+    careers_url: "https://boards.greenhouse.io/coursera"  # migrado a Greenhouse (verificado 2026-07-03)
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Flexport"
+    careers_url: "https://boards.greenhouse.io/flexport"  # migrado a Greenhouse (verificado 2026-07-03)
+    ats_type: "greenhouse"
+    enabled: true
+  - name: "Grammarly"
+    careers_url: "https://jobs.lever.co/grammarly"
+    ats_type: "lever"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "Etsy"
+    careers_url: "https://jobs.lever.co/etsy"
+    ats_type: "lever"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+  - name: "Opendoor"
+    careers_url: "https://jobs.lever.co/opendoor"
+    ats_type: "lever"
+    enabled: false  # sin board público en GH/Ashby/Lever (verificado 2026-07-03)
+
+  # --- Deshabilitados (ATS no compatible o sin board) ---
+  - name: "Thomson Reuters"
+    careers_url: "https://thomsonreuters.wd5.myworkdayjobs.com/"
+    ats_type: "workday"
+    enabled: false  # usa Workday, no Greenhouse
+  - name: "MercadoLibre"
+    careers_url: "https://boards.greenhouse.io/mercadolibre"
+    ats_type: "greenhouse"
+    enabled: false  # board no disponible públicamente
+  - name: "Globant"
+    careers_url: "https://boards.greenhouse.io/globant"
+    ats_type: "greenhouse"
+    enabled: false  # board no disponible públicamente
+  - name: "Rappi"
+    careers_url: "https://boards.greenhouse.io/rappi"
+    ats_type: "greenhouse"
+    enabled: false  # board no disponible públicamente
+  - name: "LangChain"
+    careers_url: "https://jobs.ashbyhq.com/langchain"
+    ats_type: "ashby"
+    enabled: false  # roles solo SF/NYC

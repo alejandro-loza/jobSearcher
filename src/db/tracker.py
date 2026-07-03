@@ -386,45 +386,22 @@ class JobTracker:
 
     # --- APPLICATION QUEUE (application_agent) ---
 
-    # Keywords para filtrar jobs por ubicación (CDMX / remoto para México)
-    _CDMX_KEYWORDS = (
-        "mexico city", "ciudad de mexico", "ciudad de méxico", "cdmx",
-        "polanco", "cuajimalpa", "álvaro obregón", "alvaro obregon",
-        "miguel hidalgo", "coyoacán", "benito juárez",
-    )
-    _REMOTE_KEYWORDS = ("remote", "remoto", "remote - mexico", "remote mexico", "remote, mexico")
-    _EXCLUDE_LOCATIONS = (
-        "remote, us", "remote us", "remote, united states",
-        "united states", "canada", "singapore", "united kingdom",
-        "ireland", "germany", "spain", "romania", "hong kong",
-    )
-
     def _is_cdmx_or_remote_mx(self, location: Optional[str]) -> bool:
         """
-        True SOLO si:
-          - Ubicación explícita en CDMX / zona metropolitana
-          - Remoto con país México/LatAm explícito
-          - Sin location (fallback permisivo — el scanner filtra por empresa)
+        True si la ubicación permite trabajar desde México.
 
-        Rechaza: Remote, Remote US, Remote Europe, Remote Canada, etc.
+        Delegado a portal_scanner.location_allows_mexico() — única fuente de
+        verdad. "Remote" genérico ahora PASA: el scorer (evaluate_job_match)
+        verifica en la descripción si el remoto está restringido a otro país
+        (workable_from_mexico) y topa el score a 20 si lo está, así que un job
+        con score>=75 ya viene vetado. La regla anterior ("Remote genérico →
+        rechazado") era redundante con eso y además marcaba skip_location
+        destruyendo la cola del external_ats_agent.
         """
-        if not location:
-            return True  # sin location → el scanner ya filtra por empresa
-        low = location.lower().strip()
-        if low in ("n/a", "na", "not specified", ""):
-            return True
-        # Excluir explícitamente ubicaciones fuera de México
-        if any(excl in low for excl in self._EXCLUDE_LOCATIONS):
-            return False
-        # Permitir CDMX explícita
-        if any(kw in low for kw in self._CDMX_KEYWORDS):
-            return True
-        # Permitir remoto SOLO si menciona México/LatAm explícitamente
-        if any(kw in low for kw in self._REMOTE_KEYWORDS):
-            if "mexico" in low or "méxico" in low or "latam" in low or "latin america" in low:
-                return True
-            # "Remote" genérico sin país → RECHAZADO (podría ser USA)
-        return False
+        # Import perezoso — portal_scanner importa tracker a nivel de módulo.
+        from src.tools.portal_scanner import location_allows_mexico
+
+        return location_allows_mexico(location or "")
 
     def get_application_queue(
         self, min_score: int = 75, max_age_days: int = 14, limit: int = 50,
