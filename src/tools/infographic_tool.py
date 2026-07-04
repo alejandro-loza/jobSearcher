@@ -795,7 +795,10 @@ def generate_flow_infographic(
     """
     n_steps = len(steps)
     fig_width = 12
-    fig_height = max(12, 4.0 + n_steps * 1.8 + 1.5)
+    # Altura ajustada al contenido real (evita ~40% de lienzo vacío abajo):
+    # cabecera+título+subtítulo+barra ≈ 3.3; cada paso 1.1 (caja) + 0.65 (flecha,
+    # salvo el último); footer ≈ 1.0.
+    fig_height = 3.3 + (n_steps * 1.1) + (max(0, n_steps - 1) * 0.65) + 1.0
 
     fig, ax = plt.subplots(1, 1, figsize=(fig_width, fig_height), dpi=150)
     ax.set_xlim(0, 14)
