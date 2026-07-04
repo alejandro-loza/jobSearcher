@@ -151,6 +151,8 @@ def evaluate_job_match(
         "marketing", "salesforce admin", "functional consultant", "abap",
         ".net", "c#", "android", "ios developer", "flutter", "react native",
         "wordpress", "sap consultant", "network engineer", "dba",
+        "equity analyst", "financial analyst", "credit analyst",
+        "risk analyst", "compliance", "accountant", "auditor",
     )
     _hit = next((k for k in _OFF_PROFILE if k in _title), None)
     if _hit:
