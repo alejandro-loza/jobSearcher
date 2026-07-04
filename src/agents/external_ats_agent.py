@@ -165,8 +165,58 @@ def _get_queue(tracker: JobTracker, min_score: int, max_age_days: int, limit: in
 
 # ── Apply individual ──────────────────────────────────────────────────────────
 
+# Envío automático de aplicaciones API-driven. Por defecto FALSE (assist): llena
+# todo incl. ensayos y se detiene antes de enviar para revisión humana — las
+# respuestas de ensayo deciden si te contratan. Ponlo True para submit autónomo.
+AUTO_SUBMIT_API = False
+
+
+async def _apply_via_api(job: Dict, resume: Dict) -> Optional[Dict[str, Any]]:
+    """Apply DIRIGIDO POR API (Greenhouse/Ashby): lee el form por API, genera
+    respuestas de una vez y llena por selector. Retorna None si el ATS no expone
+    el form por API (→ el caller cae al flujo de visión)."""
+    from src.tools import ats_forms, ats_filler
+
+    url = job.get("url", "")
+    form = ats_forms.fetch_form(url, company=job.get("company", ""))
+    if not form or not form.fields:
+        return None
+
+    logger.info(f"[ext_ats] API-driven ({form.ats}): {len(form.fields)} campos, "
+                f"{len(form.required_fields())} obligatorios")
+    answers = await asyncio.to_thread(master_agent.answer_application, form, resume, job)
+
+    if form.ats != "greenhouse":
+        # Filler de Ashby aún no implementado → dejamos que el caller use visión.
+        logger.debug("[ext_ats] form API no-Greenhouse — sin filler dedicado aún")
+        return None
+
+    res = await ats_filler.fill_greenhouse_application(
+        url, answers, cv_path=CV_PATH, submit=AUTO_SUBMIT_API, headless=True,
+    )
+    # Normalizar al formato de resultado del agente.
+    if res.get("submitted"):
+        status = "applied"
+        success = True
+    elif res.get("status") == "assist_ready":
+        status = "need_user"   # llenado y listo para que Alejandro revise/envíe
+        success = False
+    else:
+        status = "error"
+        success = False
+    n_fill = len(res.get("filled", []))
+    n_fail = len(res.get("failed", []))
+    return {
+        "success": success,
+        "status": status,
+        "message": f"API-driven {res.get('status')} — llenados {n_fill}, fallidos {n_fail}",
+        "method": "api_driven",
+        "screenshot_path": res.get("screenshot", ""),
+    }
+
+
 async def _apply_one(job: Dict, resume: Dict) -> Dict[str, Any]:
-    """Genera cover letter y aplica vía browser. Retorna dict de resultado."""
+    """Aplica: primero intenta API-driven (Greenhouse); si no, visión. Retorna resultado."""
     title = job.get("title", "")
     company = job.get("company", "")
     url = job.get("url", "")
@@ -174,7 +224,17 @@ async def _apply_one(job: Dict, resume: Dict) -> Dict[str, Any]:
 
     logger.info(f"[ext_ats] Aplicando: {title} @ {company} | ATS={ats} | URL={url[:60]}")
 
-    # Cover letter
+    # Ruta preferida: API-driven (determinista, 1 llamada LLM, maneja ensayos+dropdowns).
+    try:
+        api_res = await _apply_via_api(job, resume)
+        if api_res is not None:
+            api_res["cover_letter"] = ""
+            api_res["job_id"] = job["id"]
+            return api_res
+    except Exception as e:
+        logger.warning(f"[ext_ats] API-driven falló ({e}); cae a visión")
+
+    # Fallback: flujo de visión (para ATS sin form por API).
     cover_letter = ""
     try:
         cover_letter = master_agent.generate_cover_letter(job, resume) or ""
@@ -217,9 +277,24 @@ def _persist(tracker: JobTracker, job: Dict, result: Dict):
     cover_letter = result.get("cover_letter", "")
     source = job.get("_source", "jobs_table")
 
+    is_api_assist = result.get("method") == "api_driven" and status == "need_user"
+
     if success or status in ("applied", "external_submitted", "success"):
         app_status = "applied"
         logger.success(f"[ext_ats] ✅ {job['title']} @ {job['company']}")
+    elif is_api_assist:
+        # Formulario ya LLENO (incl. ensayos) esperando revisión + envío de Alejandro.
+        app_status = "apply_ready_review"
+        logger.success(f"[ext_ats] 📝 Listo para revisar/enviar: {job['title']} @ {job['company']}")
+        try:
+            whatsapp_tool.send_message(
+                f"📝 Aplicación LISTA para tu revisión (todo lleno, incl. ensayos):\n"
+                f"*{job['title']}* @ {job['company']}\n"
+                f"Revisa el formulario y dale Enviar: {job['url']}\n"
+                f"{message}"
+            )
+        except Exception:
+            pass
     elif status in ("captcha", "blocked_captcha", "need_user"):
         app_status = "apply_needs_manual"
         logger.warning(f"[ext_ats] 🔧 CAPTCHA/manual: {job['title']} — {message[:80]}")

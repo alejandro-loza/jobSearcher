@@ -297,6 +297,175 @@ Escribe SOLO la cover letter, sin encabezados ni formateo extra.
         return ""
 
 
+# ── Application answerer (API-driven apply) ──────────────────────────────────
+
+def _resume_context(resume: Dict[str, Any]) -> str:
+    """CV compacto para que el LLM redacte respuestas de aplicación."""
+    pi = resume.get("personal_info", {})
+    parts = [
+        f"Nombre: {pi.get('name','')}",
+        f"Título: {pi.get('title','')}",
+        f"Resumen: {resume.get('summary','')}",
+    ]
+    exp = resume.get("experience", [])
+    if exp:
+        parts.append("Experiencia:")
+        for e in exp[:5]:
+            role = e.get("role") or e.get("title", "")
+            comp = e.get("company", "")
+            hl = e.get("highlights") or e.get("achievements") or []
+            hl_txt = "; ".join(hl[:3]) if isinstance(hl, list) else str(hl)
+            parts.append(f"  - {role} @ {comp}: {hl_txt}")
+    skills = resume.get("skills", {})
+    if isinstance(skills, dict):
+        flat = []
+        for v in skills.values():
+            flat += v if isinstance(v, list) else [str(v)]
+        parts.append("Skills: " + ", ".join(flat[:20]))
+    langs = resume.get("languages", [])
+    if langs:
+        parts.append("Idiomas: " + ", ".join(
+            f"{l.get('language','')} ({l.get('level','')})" for l in langs))
+    return "\n".join(parts)
+
+
+def _profile_value(field, resume: Dict[str, Any]) -> Optional[str]:
+    """Mapeo DETERMINISTA de campos estándar desde el perfil (sin LLM)."""
+    pi = resume.get("personal_info", {})
+    social = resume.get("social", {})
+    name = pi.get("name", "").strip()
+    first, _, last = name.partition(" ")
+    label = (field.label or "").lower()
+    n = (field.name or "").lower()
+
+    if n == "first_name" or ("first name" in label and "preferred" not in label):
+        return first
+    if n == "last_name" or "last name" in label:
+        return last
+    if n == "email" or label == "email" or label.endswith(" email"):
+        return pi.get("email") or social.get("email", "")
+    if n == "phone" or "phone" in label:
+        return pi.get("phone") or social.get("phone", "")
+    if "linkedin" in label or "linkedin" in n:
+        return pi.get("linkedin") or social.get("linkedin", "")
+    if any(k in label for k in ("website", "portfolio", "github")):
+        return pi.get("github") or social.get("github", "")
+    if "country" in label:
+        return "México"
+    if "city" in label:
+        return "Ciudad de México"
+    return None
+
+
+def _match_option(answer: str, options: List[dict]) -> Optional[str]:
+    """Devuelve el label de opción que mejor matchea la respuesta del LLM."""
+    if not options:
+        return answer
+    ans = (answer or "").strip().lower()
+    for o in options:
+        if o["label"].strip().lower() == ans:
+            return o["label"]
+    for o in options:  # substring
+        if ans and (ans in o["label"].lower() or o["label"].lower() in ans):
+            return o["label"]
+    return None
+
+
+def answer_application(form, resume: Dict[str, Any], job: Dict[str, Any]) -> Dict[str, Dict]:
+    """
+    Genera TODAS las respuestas del formulario de aplicación de una sola vez.
+
+    Híbrido: campos estándar (nombre/email/teléfono/linkedin/ubicación) por mapeo
+    determinista; dropdowns + ensayos + salario por UNA llamada al LLM. Devuelve
+    {field_name: {value, label, type, required, source}}. Los campos de archivo
+    (CV) se marcan source='file' para que el Filler suba el PDF.
+    """
+    answers: Dict[str, Dict] = {}
+    llm_fields = []       # campos que van al LLM
+    seen_file_groups = set()
+
+    for f in form.fields:
+        # Archivos: el Filler sube el CV; el textarea-gemelo del grupo se salta.
+        if f.type == "file":
+            if "resume" in f.name.lower() or "resume" in (f.label or "").lower() or "cv" in (f.label or "").lower():
+                answers[f.name] = {"value": None, "label": f.label, "type": "file",
+                                   "required": f.required, "source": "file_cv"}
+                if f.group:
+                    seen_file_groups.add(f.group)
+            continue
+        if f.group and f.group in seen_file_groups and f.type == "textarea":
+            # resume_text / cover_letter_text — el archivo ya cubre el requisito.
+            continue
+
+        det = _profile_value(f, resume)
+        if det is not None and f.type in ("text", "textarea"):
+            answers[f.name] = {"value": det, "label": f.label, "type": f.type,
+                               "required": f.required, "source": "profile"}
+        else:
+            llm_fields.append(f)
+
+    # Una sola llamada al LLM para dropdowns + ensayos + salario.
+    if llm_fields:
+        specs = []
+        for f in llm_fields:
+            spec = {"name": f.name, "label": f.label, "type": f.type, "required": f.required}
+            if f.options:
+                spec["options"] = [o["label"] for o in f.options]
+            specs.append(spec)
+
+        prompt = f"""Eres Alejandro, postulando a un empleo. Responde el formulario con
+sus datos reales y respuestas de calidad. Responde en el MISMO idioma de cada pregunta.
+
+CV DE ALEJANDRO:
+{_resume_context(resume)}
+
+EMPLEO:
+- Título: {job.get('title','')}
+- Empresa: {job.get('company','')}
+- Descripción: {(job.get('description') or '')[:1500]}
+
+CAMPOS A RESPONDER (JSON): {json.dumps(specs, ensure_ascii=False)}
+
+Reglas:
+- Para type 'select_single': responde EXACTAMENTE con una de las 'options'.
+- Para type 'select_multi': responde con una lista de 'options' (usa la moneda MXN si preguntan currency).
+- Para nivel de inglés: Alejandro es Avanzado-Professional → elige la opción más cercana (Advanced o Fluent).
+- Para preguntas de ensayo: 2-4 oraciones, concretas, primera persona, específicas al puesto/empresa y basadas en el CV real. Nada genérico.
+- Para expectativa salarial: apunta por encima de su empleo actual (~50k MXN mixto). Da un rango bruto mensual en MXN acorde a un rol senior (p.ej. "MXN 80,000–95,000, negociable").
+- Para experiencia en fintech: responde según el CV real (sé honesto).
+
+Responde SOLO JSON válido: {{"field_name": "respuesta", ...}} (listas para select_multi)."""
+
+        try:
+            raw = coordinator.invoke("cover_letter", [HumanMessage(content=prompt)],
+                                     temperature=0.6, max_tokens=2000).strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            llm_out = json.loads(raw)
+        except Exception as e:
+            logger.error(f"[answer_application] LLM falló: {e}")
+            llm_out = {}
+
+        for f in llm_fields:
+            val = llm_out.get(f.name)
+            source = "llm"
+            if f.type == "select_single":
+                matched = _match_option(str(val) if val is not None else "", f.options)
+                val = matched if matched else (f.options[0]["label"] if f.options else val)
+                if matched is None:
+                    source = "llm_fallback"
+            elif f.type == "select_multi":
+                vals = val if isinstance(val, list) else [val]
+                matched = [m for m in (_match_option(str(v), f.options) for v in vals) if m]
+                val = matched or ([f.options[0]["label"]] if f.options else vals)
+            answers[f.name] = {"value": val, "label": f.label, "type": f.type,
+                               "required": f.required, "source": source}
+
+    return answers
+
+
 def analyze_email_response(
     email_content: str,
     email_subject: str,
