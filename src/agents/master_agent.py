@@ -143,7 +143,8 @@ def evaluate_job_match(
     _title = (job.get("title") or "").lower()
     _OFF_PROFILE = (
         "tester", "qa ", " qa", "quality assurance", "quality engineer",
-        "test engineer", "sdet", "support", "help desk", "service desk",
+        "test engineer", "test automation", "automation engineer", "testing",
+        "sdet", "support", "help desk", "service desk",
         "data scientist", "data analyst", "business analyst", "scrum master",
         "product manager", "product owner", "project manager", "designer",
         "ux", "ui designer", "recruiter", "sales", "account executive",
