@@ -115,6 +115,17 @@ def parse_ashby(data: dict, company: str) -> list[dict]:
         url = j.get("jobUrl", "")
         title = j.get("title", "")
         loc = j.get("location", "") or ""
+        # Ashby reporta "Remote" a secas pero el país real viene en address /
+        # secondaryLocations. Sin esto, "Remote" (US) pasa el filtro de México.
+        countries = []
+        country = ((j.get("address") or {}).get("postalAddress") or {}).get("addressCountry")
+        if country:
+            countries.append(country)
+        for s in j.get("secondaryLocations", []):
+            c = ((s.get("address") or {}).get("postalAddress") or {}).get("addressCountry")
+            countries.append(c or s.get("location", ""))
+        if countries:
+            loc = f"{loc} ({', '.join(str(c) for c in countries if c)})"
         jobs.append(
             {
                 "id": _mk_id(company, url, title),
