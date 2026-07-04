@@ -216,7 +216,10 @@ _MX_OK = [
     "global",
     "anywhere",
 ]
-_REMOTE_TOKENS = ("remote", "remoto")
+_REMOTE_TOKENS = (
+    "remote", "remoto", "desde casa", "home office", "teletrabajo",
+    "work from home", "wfh",
+)
 
 
 def location_allows_mexico(location: str) -> bool:
@@ -233,6 +236,10 @@ def location_allows_mexico(location: str) -> bool:
     if not low or low in ("n/a", "na", "not specified"):
         return True  # sin dato → lo decide el scorer con la descripción
     if any(k in low for k in _MX_OK):
+        return True
+    # Abreviatura "MX" con frontera de palabra ("Desde casa, MX", "Remote, MX").
+    # No va en _MX_OK porque como substring pescaría falsos positivos.
+    if re.search(r"\bmx\b", low):
         return True
     rem = low
     for t in _REMOTE_TOKENS:
