@@ -31,20 +31,13 @@ def login_and_save_cookies() -> bool:
 
     pw = None
     browser = None
+    ctx = None
     try:
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-        ctx = browser.new_context(
-            user_agent=linkedin_governor.USER_AGENT,
-            viewport={"width": 1366, "height": 768},
-        )
-        page = ctx.new_page()
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        # Contexto PERSISTENTE compartido: el login se guarda en el mismo perfil
+        # que usan lecturas/escrituras → misma "computadora" para LinkedIn.
+        from src.tools import linkedin_session
+
+        pw, ctx, page = linkedin_session.build_persistent_context(headless=True)
 
         # Ir a la página de login
         page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded", timeout=20000)
@@ -104,6 +97,8 @@ def login_and_save_cookies() -> bool:
         try:
             if browser:
                 browser.close()
+            elif ctx:
+                ctx.close()  # persistent context = browser+context en uno
             if pw:
                 pw.stop()
         except Exception:

@@ -976,6 +976,54 @@ async def external_ats_task():
         logger.error(f"[ext_ats] error: {e}")
 
 
+async def linkedin_health_task():
+    """Monitor de riesgo de baneo (cada ~2h): probe de sesión + risk_report.
+    Escala ban SOLO ante restricción real (checkpoint/restricted); sesión muerta
+    solo avisa para refrescar cookie. Cero provocación."""
+    from src.tools import linkedin_health
+
+    try:
+        out = await asyncio.to_thread(
+            linkedin_health.run_health_check, whatsapp_tool.send_message
+        )
+        p, r = out["probe"], out["risk"]
+        logger.info(
+            f"[li_health] sesión={p['status']} http={p['http']} | "
+            f"riesgo={r['risk_score']}({r['band']}) writes={r['writes']} reads={r['reads']}"
+        )
+    except Exception as e:
+        logger.error(f"[li_health] error: {e}")
+
+
+async def linkedin_passive_task():
+    """Actividad pasiva de COBERTURA: una lectura benigna gobernada (badge de
+    notificaciones) para equilibrar la mezcla de acciones — que las escrituras no
+    sean la única huella. Gobernada por gov.PASSIVE; se salta si no toca."""
+    ok, reason = gov.can_act(gov.PASSIVE)
+    if not ok:
+        logger.debug(f"[li_passive] skip: {reason}")
+        return
+    try:
+        from src.tools.linkedin_messages_tool import _build_session
+
+        await asyncio.to_thread(gov.human_delay, gov.PASSIVE)
+        s = await asyncio.to_thread(_build_session)
+        # Endpoint benigno de solo-lectura (badge de notificaciones).
+        resp = await asyncio.to_thread(
+            lambda: s.get(
+                "https://www.linkedin.com/voyager/api/voyagerNotificationsDashBadge",
+                timeout=10,
+            )
+        )
+        if resp.status_code == 200:
+            gov.record_action(gov.PASSIVE, meta="notif_badge")
+            logger.info("[li_passive] lectura de cobertura registrada")
+        else:
+            logger.debug(f"[li_passive] badge http={resp.status_code}")
+    except Exception as e:
+        logger.debug(f"[li_passive] error: {e}")
+
+
 async def score_pending_task():
     """
     Eslabón scan→SCORE→apply del loop autónomo ATS.
@@ -1464,6 +1512,20 @@ async def lifespan(app: FastAPI):
         max_instances=1, coalesce=True, replace_existing=True,
     )
 
+    # [LI HEALTH] Monitor de riesgo de baneo cada 2h: probe de sesión + risk_score.
+    # Detecta señales tempranas SIN provocar. Escala ban solo ante restricción real.
+    scheduler.add_job(
+        linkedin_health_task, "interval", hours=2, id="linkedin_health",
+        max_instances=1, coalesce=True, replace_existing=True,
+    )
+
+    # [LI PASSIVE] Lectura de cobertura gobernada (~cada 3h, gateada a pocas/día)
+    # para equilibrar la mezcla de acciones (no solo escrituras).
+    scheduler.add_job(
+        linkedin_passive_task, "interval", hours=3, id="linkedin_passive",
+        max_instances=1, coalesce=True, replace_existing=True,
+    )
+
     # External ATS apply (Greenhouse/Lever/Ashby) — sin riesgo LinkedIn, 3 apps/ciclo
     scheduler.add_job(
         external_ats_task, "interval", hours=2, id="external_ats",
@@ -1759,6 +1821,25 @@ async def health():
         "status": "ok",
         "scheduler_jobs": [j.id for j in scheduler.get_jobs()],
         "db_stats": tracker.get_stats(),
+    }
+
+
+@app.get("/health/linkedin")
+async def health_linkedin():
+    """Monitor de riesgo de baneo: estado de sesión + risk_score (sin provocar)."""
+    from src.tools import linkedin_health
+    probe = await asyncio.to_thread(linkedin_health.probe_account_status)
+    risk = await asyncio.to_thread(linkedin_health.risk_report)
+    ban = gov.get_ban_state()
+    return {
+        "session": probe,
+        "risk": risk,
+        "ban_state": {
+            "current_state": ban.get("current_state"),
+            "recovery_mode": ban.get("recovery_mode"),
+            "ban_count": ban.get("ban_count"),
+            "warmup_anchor": ban.get("warmup_anchor"),
+        },
     }
 
 

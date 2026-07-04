@@ -58,6 +58,7 @@ MSG_SEND = "msg_send"
 CONNECT = "connect"
 POST = "post"
 LOGIN = "login"
+PASSIVE = "passive"  # lectura benigna de cobertura (feed/notifs) — equilibra la mezcla
 
 # Acciones que cuentan contra el presupuesto global de la cuenta.
 # (LOGIN y MSG_READ no son "interactivas" de escritura, pero sí suman huella;
@@ -75,6 +76,7 @@ _POLICY: Dict[str, Dict] = {
     POST:     {"per_day": 3,  "per_hour": 1, "gap_min": 90, "hours": (9, 19),  "biz_days": True},
     SEARCH:   {"per_day": 12, "per_hour": 3, "gap_min": 20, "hours": (8, 21),  "biz_days": False},
     LOGIN:    {"per_day": 4,  "per_hour": 2, "gap_min": 30, "hours": (7, 22),  "biz_days": False},
+    PASSIVE:  {"per_day": 6,  "per_hour": 2, "gap_min": 45, "hours": (8, 22),  "biz_days": False},
 }
 
 # Techo global de acciones interactivas de escritura por día.
@@ -90,6 +92,7 @@ _JITTER: Dict[str, Tuple[float, float]] = {
     POST:     (15, 45),
     SEARCH:   (5, 25),
     LOGIN:    (2, 6),
+    PASSIVE:  (8, 30),
 }
 
 BUSINESS_DAYS = {0, 1, 2, 3, 4}  # lun-vie
@@ -299,12 +302,89 @@ def record_successful_apply() -> None:
     _save_ban_history(history)
 
 
-def apply_daily_cap() -> int:
-    """Cap de apply vigente (considera recovery mode)."""
+# ── Cap diario efectivo (aleatorización determinista + días ligeros + warmup) ──
+
+# Duración del warmup tras (re)activar la cuenta: los caps escalan de
+# WARMUP_FLOOR a 1.0 durante estos días.
+WARMUP_DAYS = 28
+WARMUP_FLOOR = 0.4
+
+
+def _date_seed(kind: str, d) -> "random.Random":
+    """RNG determinista por (fecha, tipo): mismo valor durante todo el día, distinto
+    día a día. Evita el patrón mecánico de un cap fijo sin introducir aleatoriedad
+    que rompa la idempotencia dentro del mismo día."""
+    return random.Random(f"{d.isoformat()}::{kind}")
+
+
+def _is_light_day(d) -> bool:
+    """1-2 días/semana (deterministas) son 'ligeros'. Nunca golpear el cap 7/7 días
+    es justo lo que recomiendan las prácticas 2026."""
+    wr = random.Random(f"lightweek::{d.isocalendar()[0]}::{d.isocalendar()[1]}")
+    light = set(wr.sample(range(7), k=wr.choice([1, 2])))
+    return d.weekday() in light
+
+
+def _warmup_multiplier(now: Optional[datetime] = None) -> float:
+    """0.4→1.0 lineal durante WARMUP_DAYS desde el ancla de warmup. 1.0 si no hay
+    ancla o ya maduró. El ancla se setea en set_warmup_anchor() (primer run/reset)."""
     history = _load_ban_history()
-    if history.get("recovery_mode"):
-        return int(history.get("recovery_daily_limit", DEFAULT_DAILY_CAP))
-    return _POLICY[APPLY]["per_day"]
+    anchor = history.get("warmup_anchor")
+    if not anchor:
+        return 1.0
+    try:
+        anchor_dt = datetime.fromisoformat(anchor)
+    except (ValueError, TypeError):
+        return 1.0
+    now = now or datetime.now()
+    days = (now - anchor_dt).total_seconds() / 86400.0
+    if days >= WARMUP_DAYS:
+        return 1.0
+    if days < 0:
+        return WARMUP_FLOOR
+    return WARMUP_FLOOR + (1.0 - WARMUP_FLOOR) * (days / WARMUP_DAYS)
+
+
+def set_warmup_anchor(when: Optional[datetime] = None, force: bool = False) -> None:
+    """Fija el ancla de warmup (idempotente salvo force). Llamar tras un reset del
+    pipeline o en el primer arranque para que la cuenta 'rampee' en vez de saltar."""
+    history = _load_ban_history()
+    if history.get("warmup_anchor") and not force:
+        return
+    history["warmup_anchor"] = (when or datetime.now()).isoformat()
+    _save_ban_history(history)
+    logger.info(f"[gov] warmup_anchor = {history['warmup_anchor']} ({WARMUP_DAYS}d ramp)")
+
+
+def _effective_daily_cap(kind: str, now: Optional[datetime] = None) -> int:
+    """Cap diario efectivo del tipo: base de _POLICY, con jitter determinista ±30%,
+    día ligero (~50%) y multiplicador de warmup. APPLY además respeta recovery."""
+    now = now or datetime.now()
+    d = now.date()
+    base = _POLICY[kind]["per_day"]
+
+    rng = _date_seed(kind, d)
+    factor = rng.uniform(0.7, 1.3)           # ±30% día a día
+    if _is_light_day(d):
+        factor *= 0.5                         # día ligero
+    factor *= _warmup_multiplier(now)         # warmup ramp
+    cap = max(1, round(base * factor))
+
+    # Recovery de APPLY es un TECHO (nunca sube el cap), pero la aleatorización /
+    # warmup / día ligero pueden bajarlo más. Una cuenta ya flageada debe ir
+    # SIEMPRE por el mínimo de ambos.
+    if kind == APPLY:
+        history = _load_ban_history()
+        if history.get("recovery_mode"):
+            recovery_cap = int(history.get("recovery_daily_limit", DEFAULT_DAILY_CAP))
+            cap = min(cap, recovery_cap)
+
+    return cap
+
+
+def apply_daily_cap() -> int:
+    """Cap de apply vigente hoy (recovery + aleatorización + días ligeros + warmup)."""
+    return _effective_daily_cap(APPLY)
 
 
 def get_ban_state() -> Dict:
@@ -345,8 +425,9 @@ def can_act(kind: str, now: Optional[datetime] = None) -> Tuple[bool, str]:
 
     pol = _POLICY[kind]
 
-    # 3. Cap diario del tipo (apply usa cap dinámico por recovery)
-    per_day = apply_daily_cap() if kind == APPLY else pol["per_day"]
+    # 3. Cap diario efectivo del tipo (aleatorizado + días ligeros + warmup;
+    #    APPLY además respeta recovery). Ver _effective_daily_cap.
+    per_day = _effective_daily_cap(kind, now)
     day_count = _count(kind, "datetime('now','-1 day')")
     if day_count >= per_day:
         return False, f"daily_cap:{day_count}/{per_day}"

@@ -26,53 +26,39 @@ def _load_cookies() -> dict:
         return {}
 
 
-def _build_playwright_context():
-    """Returns (playwright, browser, context, page) with LinkedIn cookies loaded."""
-    from playwright.sync_api import sync_playwright
+def _build_playwright_context(headless: bool = True):
+    """Returns (playwright, browser, context, page).
 
-    cookies = _load_cookies()
-    li_at = cookies.get("li_at", "")
-    jsessionid = cookies.get("JSESSIONID", "").replace('"', '')
+    Usa el contexto PERSISTENTE compartido (src/tools/linkedin_session.py) para
+    fingerprint/sesión consistentes — antes cada post abría un new_context fresco
+    y terminaba invalidando el JSESSIONID. `browser` se retorna como None porque
+    el persistent context es browser+context en uno (el caller solo cierra context).
+    """
+    from src.tools import linkedin_session
 
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-    )
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-    )
-    page = context.new_page()
-    page.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    # Navegar a linkedin.com primero (sin cookies) para establecer el dominio,
-    # luego agregar cookies y navegar al destino — evita ERR_TOO_MANY_REDIRECTS
-    page.goto("https://www.linkedin.com/", wait_until="domcontentloaded", timeout=15000)
-    context.add_cookies([
-        {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"},
-        {"name": "JSESSIONID", "value": f'"{jsessionid}"', "domain": ".www.linkedin.com", "path": "/"},
-    ])
-    return pw, browser, context, page
+    pw, context, page = linkedin_session.build_persistent_context(headless=headless)
+    return pw, None, context, page
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def post_to_linkedin(text: str, image_path: Optional[str] = None) -> bool:
+def post_to_linkedin(
+    text: str, image_path: Optional[str] = None, headless: bool = True
+) -> bool:
     """Publish a post to LinkedIn. Returns True if successful."""
     pw = None
     browser = None
     try:
-        pw, browser, context, page = _build_playwright_context()
+        pw, browser, context, page = _build_playwright_context(headless=headless)
 
         logger.info("[linkedin_post] Navigating to LinkedIn feed...")
-        page.goto("https://www.linkedin.com/feed/", wait_until="load", timeout=45000)
-        time.sleep(4)
+        # domcontentloaded en vez de load: el feed de LinkedIn nunca dispara
+        # 'load' del todo (streaming infinito) → timeout. domcontentloaded basta
+        # para que el compositor exista; damos margen extra con el sleep.
+        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=45000)
+        time.sleep(6)
 
         # Click "Start a post" / "Iniciar una publicación"
         start_post_selectors = [
@@ -234,6 +220,8 @@ def post_to_linkedin(text: str, image_path: Optional[str] = None) -> bool:
         try:
             if browser:
                 browser.close()
+            else:
+                context.close()  # persistent context = browser+context en uno
             if pw:
                 pw.stop()
         except Exception:
@@ -244,6 +232,37 @@ def _upload_image(page, image_path: str) -> bool:
     """Upload an image to a LinkedIn post draft. Returns True if successful."""
     from pathlib import Path as _Path
     abs_path = str(_Path(image_path).resolve())
+
+    def _confirm_editor() -> None:
+        """El editor de imagen de LinkedIn pide Siguiente/Next/Done tras subir."""
+        for next_sel in [
+            'button:has-text("Siguiente")',
+            'button:has-text("Next")',
+            'button:has-text("Done")',
+            'button:has-text("Listo")',
+        ]:
+            try:
+                nb = page.locator(next_sel).first
+                if nb.is_visible(timeout=3000):
+                    nb.click()
+                    logger.info(f"[linkedin_post] Editor de imagen: click {next_sel}")
+                    time.sleep(2)
+                    break
+            except Exception:
+                continue
+
+    # Estrategia PREFERIDA: set_input_files directo sobre el <input type=file>
+    # — programático, NO abre el diálogo nativo del SO (que congela el renderer).
+    try:
+        file_inputs = page.locator('input[type="file"]')
+        if file_inputs.count() > 0:
+            file_inputs.first.set_input_files(abs_path)
+            time.sleep(4)
+            logger.info("[linkedin_post] Imagen subida vía set_input_files (directo)")
+            _confirm_editor()
+            return True
+    except Exception as e:
+        logger.debug(f"[linkedin_post] set_input_files directo falló: {e}")
 
     # Click "Añadir contenido" / "Add media" button and catch file chooser
     media_selectors = [
