@@ -350,10 +350,13 @@ def _profile_value(field, resume: Dict[str, Any]) -> Optional[str]:
         return pi.get("linkedin") or social.get("linkedin", "")
     if any(k in label for k in ("website", "portfolio", "github")):
         return pi.get("github") or social.get("github", "")
-    if "country" in label:
-        return "México"
-    if "city" in label:
-        return "Ciudad de México"
+    # Ubicación: solo si el campo ES de ubicación (no si "country"/"city" aparece
+    # incidentalmente, p.ej. "salary range... currency of your country").
+    if not any(k in label for k in ("salary", "salario", "compensation", "expectation")):
+        if "country" in label or "país" in label:
+            return "México"
+        if "city" in label or "ciudad" in label:
+            return "Ciudad de México"
     return None
 
 
@@ -427,10 +430,15 @@ EMPLEO:
 CAMPOS A RESPONDER (JSON): {json.dumps(specs, ensure_ascii=False)}
 
 Reglas:
+- VERACIDAD (CRÍTICO): usa SOLO hechos, tecnologías, empresas y métricas que aparezcan
+  LITERALMENTE en el CV de arriba. NO inventes números, porcentajes, lenguajes/tecnologías
+  (p.ej. no digas "Go" si el CV dice Java), ni logros que no estén en el CV. Si no tienes
+  un dato específico, sé general en vez de inventar. Estas respuestas las tendrá que
+  sostener Alejandro en una entrevista.
 - Para type 'select_single': responde EXACTAMENTE con una de las 'options'.
 - Para type 'select_multi': responde con una lista de 'options' (usa la moneda MXN si preguntan currency).
 - Para nivel de inglés: Alejandro es Avanzado-Professional → elige la opción más cercana (Advanced o Fluent).
-- Para preguntas de ensayo: 2-4 oraciones, concretas, primera persona, específicas al puesto/empresa y basadas en el CV real. Nada genérico.
+- Para preguntas de ensayo: 2-4 oraciones, concretas, primera persona, específicas al puesto/empresa y basadas SOLO en el CV real. Nada genérico, nada inventado.
 - Para expectativa salarial: apunta por encima de su empleo actual (~50k MXN mixto). Da un rango bruto mensual en MXN acorde a un rol senior (p.ej. "MXN 80,000–95,000, negociable").
 - Para experiencia en fintech: responde según el CV real (sé honesto).
 
@@ -451,15 +459,24 @@ Responde SOLO JSON válido: {{"field_name": "respuesta", ...}} (listas para sele
         for f in llm_fields:
             val = llm_out.get(f.name)
             source = "llm"
+            if val is None:
+                # El LLM no respondió este campo (o falló por completo): NO adivinar.
+                # Adivinar options[0] es peligroso (p.ej. "English Level = Basic").
+                # Se deja sin responder para que el modo assist lo capture en revisión.
+                answers[f.name] = {"value": None, "label": f.label, "type": f.type,
+                                   "required": f.required, "source": "unanswered"}
+                continue
             if f.type == "select_single":
-                matched = _match_option(str(val) if val is not None else "", f.options)
-                val = matched if matched else (f.options[0]["label"] if f.options else val)
+                matched = _match_option(str(val), f.options)
+                val = matched if matched else None
                 if matched is None:
-                    source = "llm_fallback"
+                    source = "unanswered"
             elif f.type == "select_multi":
                 vals = val if isinstance(val, list) else [val]
                 matched = [m for m in (_match_option(str(v), f.options) for v in vals) if m]
-                val = matched or ([f.options[0]["label"]] if f.options else vals)
+                val = matched or None
+                if not matched:
+                    source = "unanswered"
             answers[f.name] = {"value": val, "label": f.label, "type": f.type,
                                "required": f.required, "source": source}
 

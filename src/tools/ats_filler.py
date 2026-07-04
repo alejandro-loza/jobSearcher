@@ -143,7 +143,7 @@ async def fill_greenhouse_application(
     from playwright.async_api import async_playwright
 
     abs_cv = str(Path(cv_path).resolve())
-    result = {"filled": [], "failed": [], "submitted": False, "status": "", "screenshot": ""}
+    result = {"filled": [], "failed": [], "skipped": [], "submitted": False, "status": "", "screenshot": ""}
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -167,6 +167,9 @@ async def fill_greenhouse_application(
                     if src == "file_cv" or atype == "file":
                         ok = await _fill_file(page, name, abs_cv)
                     elif atype in ("select_single", "select_multi"):
+                        if a["value"] in (None, "", []):
+                            result["skipped"].append(f"{a['label'][:40]} (sin respuesta)")
+                            continue
                         labels = a["value"] if isinstance(a["value"], list) else [a["value"]]
                         ok = await _fill_select(page, name, [str(x) for x in labels])
                     else:
