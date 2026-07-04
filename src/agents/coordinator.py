@@ -84,6 +84,17 @@ def _build_sambanova(temperature: float, max_tokens: int):
         max_tokens=max_tokens,
     )
 
+def _build_ollama(temperature: float, max_tokens: int):
+    # Local (CPU, sin costo). Último fallback; calidad limitada → solo volumen.
+    return ChatOpenAI(
+        model=settings.ollama_model,
+        api_key="ollama",  # dummy: el server local no valida
+        base_url=settings.ollama_base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=120,  # CPU es lento (~6 tok/s)
+    )
+
 
 def invoke(
     task: TaskType,
@@ -121,6 +132,10 @@ def invoke(
             providers.append(("SambaNova", _build_sambanova(temperature, max_tokens)))
         if settings.glm_api_key:
             providers.append(("GLM-4-Plus", _build_glm(temperature, max_tokens)))
+
+    # Ollama local: último fallback universal (gratis, lento, calidad 7B).
+    if settings.ollama_enabled:
+        providers.append(("Ollama-local", _build_ollama(temperature, max_tokens)))
 
     if not providers:
         raise RuntimeError("No hay LLMs configurados.")

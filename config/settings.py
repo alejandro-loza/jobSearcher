@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     sambanova_api_key: str = Field(default="", env="SAMBANOVA_API_KEY")
     sambanova_model: str = Field(default="Meta-Llama-3.3-70B-Instruct", env="SAMBANOVA_MODEL")
 
+    # Ollama - LLM local (fallback offline, CPU; solo tareas de volumen/scoring)
+    ollama_enabled: bool = Field(default=False, env="OLLAMA_ENABLED")
+    ollama_model: str = Field(default="qwen2.5:7b", env="OLLAMA_MODEL")
+    ollama_base_url: str = Field(default="http://localhost:11434/v1", env="OLLAMA_BASE_URL")
+
     # WhatsApp
     whatsapp_bridge_url: str = Field(
         default="http://localhost:3001", env="WHATSAPP_BRIDGE_URL"
