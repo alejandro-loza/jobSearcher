@@ -138,8 +138,15 @@ async def fill_greenhouse_application(
     cv_path: str = CV_PATH,
     submit: bool = False,
     headless: bool = True,
+    hold_for_human_secs: int = 0,
 ) -> Dict:
-    """Llena (y opcionalmente envía) un formulario de Greenhouse por selector."""
+    """Llena (y opcionalmente envía) un formulario de Greenhouse por selector.
+
+    hold_for_human_secs > 0: si tras el submit Greenhouse pide un código de
+    verificación por email (anti-bot), NO lo resolvemos nosotros — se deja el
+    navegador abierto (correr con headless=False) ese tiempo para que el humano
+    escriba el código y confirme; se sondea el éxito cada 3s.
+    """
     from playwright.async_api import async_playwright
 
     abs_cv = str(Path(cv_path).resolve())
@@ -209,13 +216,37 @@ async def fill_greenhouse_application(
                     except Exception:
                         continue
                 await page.wait_for_timeout(4000)
+                _SUCCESS = ("thank you for applying", "application submitted",
+                            "gracias por", "we received your application",
+                            "your application has been")
                 body = (await page.evaluate("() => document.body.innerText")).lower()
-                success = any(k in body for k in (
-                    "thank you for applying", "application submitted",
-                    "gracias por", "we received your application", "your application has been"))
+                success = any(k in body for k in _SUCCESS)
+
+                # ¿Greenhouse pide código de verificación por email (anti-bot)?
+                needs_code = (not success) and any(
+                    k in body for k in ("security code", "verification code",
+                                        "código de seguridad", "código de verificación"))
+                if needs_code and hold_for_human_secs > 0:
+                    logger.info(f"[ats_filler] Greenhouse pide código por email — "
+                                f"esperando al humano hasta {hold_for_human_secs}s...")
+                    result["status"] = "awaiting_human_code"
+                    waited = 0
+                    while waited < hold_for_human_secs:
+                        await page.wait_for_timeout(3000)
+                        waited += 3
+                        try:
+                            body = (await page.evaluate("() => document.body.innerText")).lower()
+                        except Exception:
+                            break  # el humano cerró la pestaña
+                        if any(k in body for k in _SUCCESS):
+                            success = True
+                            break
+
                 result["submitted"] = clicked and success
                 result["status"] = "submitted" if result["submitted"] else (
-                    "submit_unconfirmed" if clicked else "submit_button_not_found")
+                    "awaiting_human_code_timeout" if needs_code and hold_for_human_secs > 0
+                    else "needs_email_code" if needs_code
+                    else "submit_unconfirmed" if clicked else "submit_button_not_found")
                 try:
                     shot2 = f"data/screenshots/ats_submit_{int(asyncio.get_event_loop().time())}.png"
                     await page.screenshot(path=shot2, full_page=True)
