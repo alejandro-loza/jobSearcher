@@ -37,7 +37,7 @@ import os
 import random
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple
 
 from loguru import logger
@@ -146,6 +146,13 @@ def _count(kind: Optional[str], since_sql: str) -> int:
 
 
 def _last_action_at(kind: str) -> Optional[datetime]:
+    """Última acción del tipo, convertida a hora LOCAL.
+
+    El ledger guarda `at` con el DEFAULT datetime('now') de SQLite, que es UTC.
+    Los consumidores en Python comparan contra datetime.now() (local), así que
+    convertimos UTC→local aquí. Sin esta conversión el gap salía negativo
+    (~-6h en CDMX) y bloqueaba cada acción ~6h de más.
+    """
     with _conn() as conn:
         row = conn.execute(
             "SELECT at FROM linkedin_activity WHERE kind = ? ORDER BY at DESC LIMIT 1",
@@ -154,13 +161,17 @@ def _last_action_at(kind: str) -> Optional[datetime]:
     if not row or not row[0]:
         return None
     try:
-        return datetime.fromisoformat(row[0])
+        parsed = datetime.fromisoformat(row[0])
     except ValueError:
         # SQLite datetime('now') → 'YYYY-MM-DD HH:MM:SS'
         try:
-            return datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+            parsed = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
         except ValueError:
             return None
+    # UTC (naive) → local (naive)
+    return (
+        parsed.replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+    )
 
 
 def record_action(kind: str, meta: str = "") -> None:
