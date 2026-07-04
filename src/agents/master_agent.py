@@ -138,6 +138,26 @@ def evaluate_job_match(
             "la contratación a otro país/región."
         )
 
+    # Pre-gate de título (cero tokens): roles claramente ajenos al perfil
+    # backend/fullstack no ameritan LLM (los modelos chicos les regalan 85).
+    _title = (job.get("title") or "").lower()
+    _OFF_PROFILE = (
+        "tester", "qa ", " qa", "quality assurance", "quality engineer",
+        "test engineer", "sdet", "support", "help desk", "service desk",
+        "data scientist", "data analyst", "business analyst", "scrum master",
+        "product manager", "product owner", "project manager", "designer",
+        "ux", "ui designer", "recruiter", "sales", "account executive",
+        "marketing", "salesforce admin", "functional consultant", "abap",
+        ".net", "c#", "android", "ios developer", "flutter", "react native",
+        "wordpress", "sap consultant", "network engineer", "dba",
+    )
+    _hit = next((k for k in _OFF_PROFILE if k in _title), None)
+    if _hit:
+        return 25, (
+            f"[Título fuera de perfil: '{job.get('title', '')}' (~{_hit.strip()})] "
+            "Rol no alineado a backend/fullstack Java-Python-Node."
+        )
+
     # Build full CV context for accurate evaluation
     experience_text = ""
     for exp in resume.get("work_experience", []):
