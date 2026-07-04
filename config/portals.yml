@@ -364,9 +364,11 @@ tracked_companies:
     ats_type: "ashby"
     enabled: true
   - name: "Neon"
-    careers_url: "https://jobs.lever.co/neon"  # slug 'neon' en Lever (verificado 2026-07-03)
+    careers_url: "https://jobs.lever.co/neon"
     ats_type: "lever"
-    enabled: true
+    enabled: false  # ¡OJO! el slug 'neon' en Lever es el NEOBANCO BRASILEÑO Neon
+                    # (CLT, Brasil-only), NO Neon la DB Postgres (adquirida por
+                    # Databricks). Descubierto en auditoría 2026-07-03.
 
   # --- Lever — nuevas empresas ---
   - name: "Coursera"

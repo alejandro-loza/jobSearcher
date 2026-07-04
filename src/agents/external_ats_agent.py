@@ -32,6 +32,12 @@ from src.tools import browser_tool, whatsapp_tool
 CV_PATH = "data/cv_alejandro_en.pdf"
 RESUME_JSON = "data/resume.json"
 
+# Kill switch: si este archivo existe, el agente NO aplica (ni scheduler ni
+# /trigger/external-ats). Crear/borrar el archivo no requiere reiniciar nada:
+#   touch data/pause_external_apply.flag   # pausar
+#   rm data/pause_external_apply.flag      # reanudar
+PAUSE_FLAG = Path("data/pause_external_apply.flag")
+
 APPLY_SCORE_THRESHOLD = 75
 JOB_MAX_AGE_DAYS = 21          # ATS externos duran más que LinkedIn
 DAILY_CAP = 10                 # Sin riesgo LinkedIn → podemos ir más rápido
@@ -270,6 +276,12 @@ async def run_external_apply_cycle(
         "skipped_reason": None,
         "jobs": [],
     }
+
+    # Kill switch por archivo — el dry_run sí se permite (no aplica nada).
+    if PAUSE_FLAG.exists() and not dry_run:
+        stats["skipped_reason"] = "paused_by_flag"
+        logger.info(f"[ext_ats] pausado por {PAUSE_FLAG} — no se aplica")
+        return stats
 
     if not _verify_cv():
         stats["skipped_reason"] = "cv_missing"

@@ -183,8 +183,9 @@ CRITERIOS DE EVALUACIÓN:
   La vacante SOLO sirve si permite trabajar desde México: presencial/híbrida en México,
   o remota que contrate en México/Latam. Si la descripción indica que el remoto está
   restringido a otro país ("must be located in the US", "US work authorization",
-  "EU-based only", visa/relocation requerida, etc.) → workable_from_mexico=false y
-  score MÁXIMO 20. Ante duda razonable, asume que sí es elegible pero menciónalo en reasons.
+  "EU-based only", visa/relocation requerida, contrato "CLT" o descripción en
+  portugués = solo Brasil, etc.) → workable_from_mexico=false y score MÁXIMO 20.
+  Ante duda razonable, asume que sí es elegible pero menciónalo en reasons.
 - El candidato busca roles Sr Backend/Full Stack con Java, Spring Boot, Microservices, Cloud
 - Prefiere remoto o híbrido en CDMX
 - NO le interesan: frontend puro, QA, data science, DevOps/SRE puro, SAP, Salesforce

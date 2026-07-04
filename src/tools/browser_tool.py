@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import random
+import re
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -1323,6 +1324,18 @@ REGLAS DE NAVEGACIÓN (MUY IMPORTANTE):
 11. Si el texto de la página contiene alguno de estos patrones de éxito → status = success: {
         ", ".join(SUCCESS_PATTERNS_EXTERNAL[:6])
     }
+
+PREGUNTAS DE SCREENING — responde TODAS las preguntas requeridas (*) antes del
+submit; NUNCA pidas submit con requeridas sin responder. Respuestas estándar del
+candidato (trabaja 100% remoto DESDE México):
+- ¿Requiere visa/sponsorship (H-1B, TN, etc.)? → "No" (no necesita visa para trabajar remoto desde México)
+- ¿Autorizado para trabajar en USA? → "No" (aplica para trabajar desde México)
+- ¿Dispuesto a reubicarse (relocate)? → "No"
+- ¿Puede trabajar remoto? → "Yes"
+- ¿Empresa/empleo actual? → "ISOL (Ingeniería de Soluciones)"
+- Notice period / disponibilidad → "2 weeks"
+- ¿Cómo se enteró de la vacante? → "Company careers page"
+- Si una pregunta requerida no está cubierta arriba ni en el CV → status: "need_user" con la pregunta en message.
 """
 
     try:
@@ -1341,6 +1354,23 @@ REGLAS DE NAVEGACIÓN (MUY IMPORTANTE):
             "message": f"No pude analizar la página: {e}",
             "actions": [],
         }
+
+
+def _humanize_css_selector(selector: str) -> Optional[str]:
+    """
+    Si el LLM inventó un selector CSS tipo input[name='fullName'] que no existe
+    en el DOM, extrae el nombre del campo y lo humaniza ("full name") para
+    reintentar por label/placeholder. Cazado en auditoría 2026-07-03: Ashby y
+    Lever no usan name= y todos los fills fallaban.
+    """
+    m = re.search(r"\[(?:name|id|data-qa|aria-label)\*?=['\"]?([\w\-]+)", selector)
+    if not m:
+        return None
+    token = m.group(1)
+    # camelCase / snake-case / kebab-case → palabras
+    words = re.sub(r"([a-z])([A-Z])", r"\1 \2", token).replace("_", " ").replace("-", " ")
+    words = re.sub(r"\b(url|Url)\b", "", words).strip().lower()
+    return words or None
 
 
 async def _find_element_aggressive(page: Page, selector: str, timeout: int = 2000):
@@ -1368,6 +1398,17 @@ async def _find_element_aggressive(page: Page, selector: str, timeout: int = 200
         f'label:has-text("{selector}") ~ input',
     ]
 
+    # Si el selector es CSS con name/id (posible invención del LLM), agrega
+    # estrategias con el nombre humanizado: input[name='fullName'] → "full name"
+    human = _humanize_css_selector(selector)
+    if human and human != selector.lower():
+        strategies += [
+            f'[placeholder*="{human}" i]',
+            f'[aria-label*="{human}" i]',
+            f'label:has-text("{human}") + input',
+            f'label:has-text("{human}") ~ input',
+        ]
+
     for ctx in candidates:
         for strat in strategies:
             try:
@@ -1382,29 +1423,28 @@ async def _find_element_aggressive(page: Page, selector: str, timeout: int = 200
             except Exception:
                 continue
 
-        # By label text
-        try:
-            elem = ctx.get_by_label(selector)
-            if await elem.count() > 0:
-                return elem.first, ctx, f"get_by_label({selector})"
-        except Exception:
-            pass
-
-        # By placeholder text
-        try:
-            elem = ctx.get_by_placeholder(selector)
-            if await elem.count() > 0:
-                return elem.first, ctx, f"get_by_placeholder({selector})"
-        except Exception:
-            pass
-
-        # By role textbox with name
-        try:
-            elem = ctx.get_by_role("textbox", name=selector)
-            if await elem.count() > 0:
-                return elem.first, ctx, f"get_by_role(textbox, {selector})"
-        except Exception:
-            pass
+        # By label / placeholder / role — con el selector crudo Y el humanizado
+        for _needle in filter(None, {selector, human}):
+            try:
+                elem = ctx.get_by_label(re.compile(re.escape(_needle), re.I))
+                if await elem.count() > 0:
+                    return elem.first, ctx, f"get_by_label({_needle})"
+            except Exception:
+                pass
+            try:
+                elem = ctx.get_by_placeholder(re.compile(re.escape(_needle), re.I))
+                if await elem.count() > 0:
+                    return elem.first, ctx, f"get_by_placeholder({_needle})"
+            except Exception:
+                pass
+            try:
+                elem = ctx.get_by_role(
+                    "textbox", name=re.compile(re.escape(_needle), re.I)
+                )
+                if await elem.count() > 0:
+                    return elem.first, ctx, f"get_by_role(textbox, {_needle})"
+            except Exception:
+                pass
 
     return None, None, None
 
@@ -1630,6 +1670,7 @@ async def apply_to_job_url(
     company: str = "",
     cover_letter: str = "",
     headless: bool = True,
+    inspect_only: bool = False,
 ) -> Dict[str, Any]:
     """
     Navega y aplica a un trabajo en una URL externa usando Playwright + GLM-4.7.
@@ -1641,6 +1682,9 @@ async def apply_to_job_url(
         company: Empresa (para logs)
         cover_letter: Carta de presentación
         headless: False = abre browser visible para debugging
+        inspect_only: True = modo auditoría — llena el formulario pero se
+            DETIENE antes de clickear submit y regresa status='inspect_ready'
+            con screenshot para revisión humana. NO envía la aplicación.
 
     Returns:
         Dict con: success, status, message, screenshot_path
@@ -1930,6 +1974,30 @@ async def apply_to_job_url(
             if ats_type != "generic":
                 logger.info(f"[browser] ATS detectado: {ats_type} — {page.url}")
 
+            # Ir DIRECTO a la página del formulario (la URL del job suele ser la
+            # descripción; sin esto el LLM alucina campos que no existen y el
+            # apply sale vacío — bug cazado en auditoría 2026-07-03):
+            #   Lever:  jobs.lever.co/<org>/<id>        → …/<id>/apply
+            #   Ashby:  jobs.ashbyhq.com/<org>/<id>     → …/<id>/application
+            _u = page.url.split("?")[0].rstrip("/")
+            _form_url = None
+            if ats_type == "lever" and not _u.endswith("/apply"):
+                _form_url = _u + "/apply"
+            elif ats_type == "ashby" and not _u.endswith("/application"):
+                _form_url = _u + "/application"
+            if _form_url:
+                try:
+                    await page.goto(
+                        _form_url, wait_until="domcontentloaded", timeout=30000
+                    )
+                    await _jitter(1500)
+                    logger.info(f"[browser] Navegado al formulario: {_form_url}")
+                except Exception as e:
+                    logger.warning(
+                        f"[browser] No pude abrir el formulario directo ({e}); "
+                        f"sigo en {page.url}"
+                    )
+
             # Auto-upload: si hay input[type=file] visible, subir CV inmediatamente
             try:
                 file_inputs = page.locator('input[type="file"]')
@@ -2035,9 +2103,32 @@ async def apply_to_job_url(
                             continue
 
                 # Ejecutar acciones
+                _inspect_stop = False
                 for action in actions:
+                    # Modo auditoría: detenerse ANTES de cualquier click de submit
+                    if inspect_only and action.get("type") == "click":
+                        _sel = (
+                            f"{action.get('selector','')} {action.get('value','')}"
+                        ).lower()
+                        if any(
+                            k in _sel
+                            for k in (
+                                "submit", "enviar", "aplicar", "apply",
+                                "postular", "send application",
+                            )
+                        ):
+                            final_status = "inspect_ready"
+                            final_message = (
+                                f"[INSPECT] Formulario llenado; me detuve antes del "
+                                f"submit (selector: {action.get('selector','')!r})"
+                            )
+                            logger.info(f"Paso {step + 1}: {final_message}")
+                            _inspect_stop = True
+                            break
                     await _execute_action(page, action)
                     await page.wait_for_timeout(500)
+                if _inspect_stop:
+                    break
 
                 # Auto-upload CV en cada paso si hay file input sin archivo
                 if not cv_uploaded:
@@ -2064,7 +2155,10 @@ async def apply_to_job_url(
                     await page.wait_for_timeout(idle_timeout)
 
             screenshot_path = str(SCREENSHOTS_DIR / f"final_{int(time.time())}.png")
-            await page.screenshot(path=screenshot_path)
+            try:
+                await page.screenshot(path=screenshot_path, full_page=True)
+            except Exception:
+                await page.screenshot(path=screenshot_path)
 
             return {
                 "success": final_status == "success",
