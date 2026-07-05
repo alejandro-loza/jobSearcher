@@ -157,7 +157,12 @@ async def fill_greenhouse_application(
             headless=headless,
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
-        context = await browser.new_context(viewport={"width": 1280, "height": 1200})
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 1200},
+            # Geolocalización CDMX para el "Locate me" del campo Location (City)
+            geolocation={"latitude": 19.4326, "longitude": -99.1332},
+            permissions=["geolocation"],
+        )
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
@@ -194,16 +199,28 @@ async def fill_greenhouse_application(
             try:
                 loc_input = page.locator("#candidate-location")
                 if await loc_input.count() > 0 and not await loc_input.input_value():
+                    # 1) typeahead de Places (opciones id react-select-candidate-location-option-N)
+                    await loc_input.scroll_into_view_if_needed()
                     await loc_input.click(timeout=3000)
                     await loc_input.type("Ciudad de México", delay=60)
-                    await page.wait_for_timeout(2500)  # opciones async de Places
-                    opt = page.locator(".select__option").first
-                    if await opt.count() > 0:
-                        await opt.click(timeout=3000)
+                    opt = page.locator('[id^="react-select-candidate-location-option"]').first
+                    try:
+                        await opt.click(timeout=6000)
                         result["filled"].append("Location (City) (places)")
-                    else:
-                        await page.keyboard.press("Enter")
-                        result["filled"].append("Location (City) (enter)")
+                    except Exception:
+                        # 2) fallback: "Locate me" con geolocalización CDMX del contexto
+                        await page.keyboard.press("Escape")
+                        locate = page.locator('text="Locate me"').first
+                        await locate.click(timeout=4000)
+                        await page.wait_for_timeout(4000)
+                        # react-select guarda el valor como chip, no en el input
+                        shown = await page.evaluate(
+                            "() => document.querySelector('#candidate-location')"
+                            "?.closest('div[class*=control]')?.innerText || ''")
+                        if shown.strip():
+                            result["filled"].append(f"Location (City) (locate-me: {shown.strip()[:30]})")
+                        else:
+                            result["failed"].append("Location (City): sin valor tras locate-me")
             except Exception as e:
                 result["failed"].append(f"Location (City): {str(e)[:50]}")
 
