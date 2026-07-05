@@ -189,6 +189,24 @@ async def fill_greenhouse_application(
                 except Exception as e:
                     result["failed"].append(f"{a['label'][:40]}: {str(e)[:50]}")
 
+            # Campo "Location (City)" (#candidate-location): NO viene en el API de
+            # preguntas de Greenhouse (es el widget de Places). Autollenar si existe.
+            try:
+                loc_input = page.locator("#candidate-location")
+                if await loc_input.count() > 0 and not await loc_input.input_value():
+                    await loc_input.click(timeout=3000)
+                    await loc_input.type("Ciudad de México", delay=60)
+                    await page.wait_for_timeout(2500)  # opciones async de Places
+                    opt = page.locator(".select__option").first
+                    if await opt.count() > 0:
+                        await opt.click(timeout=3000)
+                        result["filled"].append("Location (City) (places)")
+                    else:
+                        await page.keyboard.press("Enter")
+                        result["filled"].append("Location (City) (enter)")
+            except Exception as e:
+                result["failed"].append(f"Location (City): {str(e)[:50]}")
+
             await page.wait_for_timeout(800)
             shot = f"data/screenshots/ats_fill_{int(asyncio.get_event_loop().time())}.png"
             try:
