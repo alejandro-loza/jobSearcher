@@ -154,8 +154,8 @@ await page.goto(job_url, wait_until="domcontentloaded", timeout=60000)
 3. **Datos para aplicar**:
    - CV: `data/cv_english.pdf`
    - Nombre: Alejandro Hernandez Loza
-   - Email: alejandrohloza@gmail.com
-   - Teléfono: +52 56 4144 6948
+   - Email: candidate@example.com
+   - Teléfono: +52 55 0000 0000
    - Ubicación: Ciudad de México, México
 
 4. **Aplicar en orden de prioridad**:

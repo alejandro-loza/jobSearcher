@@ -517,6 +517,15 @@ async def _linkedin_easy_apply(
     }
 
 
+def _current_employer() -> str:
+    """Empresa actual desde data/current_job.json (gitignored)."""
+    try:
+        with open("data/current_job.json", encoding="utf-8") as f:
+            return json.load(f).get("empresa", "").split(",")[0]
+    except (OSError, ValueError):
+        return ""
+
+
 async def _linkedin_fill_modal_fields(
     page: Page,
     resume: Dict,
@@ -525,8 +534,8 @@ async def _linkedin_fill_modal_fields(
 ) -> None:
     """Fill common LinkedIn Easy Apply modal fields without LLM."""
     p = resume.get("personal", resume)  # support nested or flat resume format
-    phone = p.get("phone", resume.get("phone", "+52 56 4144 6948"))
-    email = p.get("email", resume.get("email", "alejandrohloza@gmail.com"))
+    phone = p.get("phone", resume.get("phone", settings.whatsapp_my_number))
+    email = p.get("email", resume.get("email", settings.gmail_my_email))
     name = p.get("name", resume.get("full_name", "Alejandro Hernandez Loza"))
     field_map = {
         "phone": phone,
@@ -849,8 +858,8 @@ async def _linkedin_fill_with_llm(
 
 Candidate info:
 - Name: {resume.get("full_name", "Alejandro Hernandez Loza")}
-- Email: {resume.get("email", "alejandrohloza@gmail.com")}
-- Phone: {resume.get("phone", "+52 56 4144 6948")}
+- Email: {resume.get("email", settings.gmail_my_email)}
+- Phone: {resume.get("phone", settings.whatsapp_my_number)}
 - Location: Ciudad de México, México
 - Years experience: 12
 - Work authorization: Yes (Mexican citizen)
@@ -1221,8 +1230,8 @@ DATOS COMPLETOS DEL CANDIDATO (usa estos datos para llenar TODOS los campos del 
 - Nombre completo: {resume.get("full_name", "Alejandro Hernandez Loza")}
 - Primer nombre (First Name): Alejandro
 - Apellido (Last Name): Hernandez Loza
-- Email: {resume.get("email", "alejandrohloza@gmail.com")}
-- Teléfono: {resume.get("phone", "+52 56 4144 6948")}
+- Email: {resume.get("email", settings.gmail_my_email)}
+- Teléfono: {resume.get("phone", settings.whatsapp_my_number)}
 - Código de país: +52 (México)
 - Título profesional: {resume.get("professional_title", "SR. Software Engineer")}
 - Años de experiencia: {resume.get("years_of_experience", 12)}
@@ -1332,7 +1341,7 @@ candidato (trabaja 100% remoto DESDE México):
 - ¿Autorizado para trabajar en USA? → "No" (aplica para trabajar desde México)
 - ¿Dispuesto a reubicarse (relocate)? → "No"
 - ¿Puede trabajar remoto? → "Yes"
-- ¿Empresa/empleo actual? → "ISOL (Ingeniería de Soluciones)"
+- ¿Empresa/empleo actual? → "{_current_employer()}"
 - Notice period / disponibilidad → "2 weeks"
 - ¿Cómo se enteró de la vacante? → "Company careers page"
 - Si una pregunta requerida no está cubierta arriba ni en el CV → status: "need_user" con la pregunta en message.

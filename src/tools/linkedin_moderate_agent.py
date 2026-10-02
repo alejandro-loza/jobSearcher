@@ -696,7 +696,7 @@ if __name__ == "__main__":
         test_resume = {
             "first_name": "Alejandro",
             "last_name": "Hernandez Loza",
-            "email": "alejandrohloza@gmail.com",
+            "email": "candidate@example.com",
             "abs_path": "/tmp/test_cv.pdf",
         }
         

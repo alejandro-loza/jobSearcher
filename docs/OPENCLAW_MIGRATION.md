@@ -1120,7 +1120,7 @@ openclaw channel add whatsapp --webhook-secret <secret>
 ```bash
 # Usar browser tool nativo de OpenClaw
 openclaw browser navigate --url "https://linkedin.com/jobs/123"
-openclaw browser fill --selector "input[name='email']" --value "alejandrohloza@gmail.com"
+openclaw browser fill --selector "input[name='email']" --value "candidate@example.com"
 openclaw browser click --selector "button[type='submit']"
 ```
 

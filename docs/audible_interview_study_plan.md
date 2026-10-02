@@ -1444,7 +1444,7 @@ I look forward to hearing about next steps.
 
 Best regards,
 Alejandro Hernandez Loza
-alejandrohloza@gmail.com
+candidate@example.com
 LinkedIn: https://www.linkedin.com/in/alejandro-hernandez-loza/
 ```
 

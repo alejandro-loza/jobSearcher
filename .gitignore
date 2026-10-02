@@ -77,3 +77,21 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+# Secrets / datos personales (nunca subir)
+config/*.bak*
+config/*cookies*.json*
+config/*token*.json
+config/*credentials*.json
+*.pem
+*.key
+modes/_profile.md
+docs/PEDIDO_ANTIGRAVITY*.md
+docs/ANTIGRAVITY_APLICACIONES.md
+tmp_*.py
+.~lock.*#
+services/whatsapp/.wwebjs_cache/
+scratch/
+dump.html
+
+# Artefactos de `pip install pkg>=x` sin comillas
+/=*

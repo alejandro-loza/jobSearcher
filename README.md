@@ -1,394 +1,346 @@
-# JobSearcher - AI-Powered Job Search Agent System
-
-Sistema robusto de búsqueda de empleo en Python que utiliza CrewAI y LinkedIn MCP para automatizar el proceso de búsqueda, análisis y postulación a ofertas de trabajo.
-
-[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![CrewAI](https://img.shields.io/badge/CrewAI-0.80.0-orange.svg)](https://www.crewai.com/)
-
-## 🌟 Características
-
-- 🔍 **Búsqueda Automatizada**: Busca empleos en LinkedIn con filtros avanzados
-- 🤖 **Agentes IA**: 4 agentes especializados que trabajan en conjunto
-- 📊 **Análisis de Matching**: Compara tu CV con requisitos del puesto
-- 📝 **Estrategias Personalizadas**: CVs optimizados, cover letters, networking
-- 🎯 **Preparación de Entrevistas**: Preguntas técnicas y comportamentales
-- 💾 **Persistencia de Datos**: Guarda empleos, análisis y estrategias
-- 📈 **Reportes Detallados**: Análisis completo en formato estructurado
-- 🐳 **Docker Ready**: Containerización fácil para despliegue
-
-## 🏗️ Arquitectura
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        JobSearcher CLI                          │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-              ┌───────────┼───────────┐
-              │                       │
-        ┌─────▼─────┐           ┌────▼─────┐
-        │ CrewAI    │           │ LinkedIn  │
-        │ Orchestrator         │ MCP       │
-        └─────┬─────┘           └───────────┘
-              │
-    ┌─────────┼─────────┐
-    │         │         │
-┌───▼──┐  ┌──▼───┐  ┌──▼───┐
-│Job   │  │Resume│  │App   │
-│Search│  │Match │  │Strat │
-└───┬──┘  └──┬───┘  └──┬───┘
-    │        │        │
-    └────────┼────────┘
-             │
-        ┌────▼────┐
-        │Interview│
-        │Prep     │
-        └─────────┘
-```
-
-## 🚀 Instalación Rápida
-
-### Prerrequisitos
-
-- Python 3.10 o superior
-- pip
-- (Opcional) Docker y Docker Compose
-
-### Opción 1: Instalación Manual
-
-```bash
-# Clonar el repositorio
-git clone https://github.com/yourusername/jobsearcher.git
-cd jobsearcher
-
-# Crear entorno virtual
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# o
-venv\Scripts\activate  # Windows
-
-# Ejecutar script de setup
-python scripts/setup.py
-```
-
-### Opción 2: Docker
-
-```bash
-# Clonar el repositorio
-git clone https://github.com/yourusername/jobsearcher.git
-cd jobsearcher
-
-# Copiar y configurar .env
-cp .env.example .env
-# Editar .env con tus API keys
-
-# Iniciar con Docker Compose
-docker-compose up -d
-
-# Entrar al contenedor
-docker-compose exec jobsearcher /bin/bash
-```
-
-## ⚙️ Configuración
-
-1. **API Keys** - Editar `.env`:
-```bash
-OPENAI_API_KEY=sk-proj-XXXXXXXXXXXXXXXXXXXXXXXXXXXX
-ANTHROPIC_API_KEY=sk-ant-XXXXXXXXXXXXXXXXXXXXXXXXXXXX
-```
-
-2. **LinkedIn MCP** - Instalar y configurar:
-```bash
-# Seguir instrucciones en https://linkedapi.io/mcp/installation/
-LINKEDIN_MCP_ENABLED=true
-LINKEDIN_MCP_SERVER_URL=http://localhost:3000
-```
-
-3. **CV del Usuario** - Cargar tu CV:
-```bash
-# Usar el ejemplo o crear el tuyo
-cp data/resume_example.json data/resume.json
-# Editar data/resume.json con tu información
-```
-
-## 💻 Uso
-
-### Comandos Disponibles
-
-```bash
-# Ver ayuda
-python -m src.cli --help
-
-# Búsqueda básica
-python -m src.cli search --keywords "python developer" --location remote
-
-# Búsqueda avanzada
-python -m src.cli search \
-  --keywords "senior python developer" \
-  --location "Madrid" \
-  --job-type "full-time" \
-  --limit 20
-
-# Análisis completo de un puesto
-python -m src.cli analyze --job-id "job_123"
-
-# Análisis de matching
-python -m src.cli match --limit 10
-
-# Generar estrategia de aplicación
-python -m src.cli strategy --job-id "job_123"
-
-# Preparación de entrevista
-python -m src.cli interview --job-id "job_123"
-
-# Modo interactivo
-python -m src.cli interactive
-```
-
-### Usando Makefile (Linux/Mac)
-
-```bash
-make setup          # Ejecutar setup inicial
-make install        # Instalar dependencias
-make test           # Ejecutar tests
-make search         # Búsqueda de ejemplo
-make docker-up      # Iniciar Docker
-make docker-down    # Detener Docker
-```
-
-## 🤖 Agentes
-
-### 1. Job Search Agent 📊
-
-**Rol**: Job Search Specialist  
-**Objetivo**: Encontrar las mejores oportunidades de empleo en LinkedIn
-
-**Funcionalidades**:
-- Búsqueda avanzada con múltiples filtros
-- Análisis de descripciones de puestos
-- Evaluación de salary ranges
-- Análisis de compañía
-
-**Herramientas**: LinkedIn MCP (search_jobs, get_job_details, get_company_info)
-
-### 2. Resume Matcher Agent 🎯
-
-**Rol**: Resume Matching Specialist  
-**Objetivo**: Analizar el match entre perfil y requisitos
-
-**Funcionalidades**:
-- Comparación de habilidades técnicas y blandas
-- Identificación de gaps
-- Análisis de experiencia relevante
-- Score de matching (0-100)
-
-**Output**: Reporte con matched skills, missing skills, strengths, improvements
-
-### 3. Application Strategist Agent 📝
-
-**Rol**: Application Strategy Specialist  
-**Objetivo**: Diseñar estrategias para maximizar chances de éxito
-
-**Funcionalidades**:
-- Optimización de CV (ATS-friendly)
-- Cover letters personalizadas
-- Mensajes para networking
-- Timing y posicionamiento
-
-**Output**: CV optimizado, cover letter, connection message, checklist
-
-### 4. Interview Prep Agent 🎤
-
-**Rol**: Interview Preparation Specialist  
-**Objetivo**: Preparar para entrevistas
-
-**Funcionalidades**:
-- Preguntas técnicas con soluciones
-- Preguntas comportamentales (STAR)
-- Research de la empresa
-- Mock interviews
-
-**Output**: Preguntas y respuestas, STAR stories, research guide, success tips
-
-## 📊 Ejemplos de Uso
-
-### Ejemplo 1: Búsqueda Simple
-
-```python
-from src.crew import JobSearchCrew
-from src.utils.storage import DataStorage
-
-# Cargar CV
-storage = DataStorage()
-resume = storage.load_resume()
-
-# Buscar empleos
-crew_manager = JobSearchCrew()
-crew_manager.initialize()
-
-crew = crew_manager.create_job_search_crew(
-    search_params={
-        "keywords": "python developer",
-        "location": "remote",
-        "limit": 10
-    },
-    resume_data=resume
-)
-
-result = await crew.kickoff()
-print(result)
-```
-
-### Ejemplo 2: Análisis Completo
-
-```python
-# Búsqueda + Matching + Estrategia + Preparación
-crew = crew_manager.create_full_analysis_crew(
-    search_params={...},
-    resume_data=resume,
-    job_details=job,
-    matching_score=75
-)
-
-result = await crew.kickoff()
-```
-
-Ver más ejemplos en `examples/`:
-- `basic_usage.py` - Ejemplos básicos
-- `advanced_usage.py` - Workflows avanzados
-
-## 📁 Estructura del Proyecto
-
-```
-jobSearcher/
-├── src/
-│   ├── agents/          # Agentes CrewAI
-│   ├── tasks/           # Definición de tareas
-│   ├── tools/           # Herramientas externas
-│   ├── crew/            # Configuración de crews
-│   ├── models/          # Modelos de datos
-│   ├── utils/           # Utilidades
-│   ├── cli.py           # Interfaz CLI
-│   └── main.py          # Main entry point
-├── tests/               # Tests
-├── examples/            # Ejemplos de uso
-├── data/                # Datos almacenados
-├── logs/                # Logs de ejecución
-├── docs/                # Documentación
-├── scripts/             # Scripts utilitarios
-├── config/              # Configuración
-├── requirements.txt     # Dependencias
-├── .env.example        # Template de variables
-├── Dockerfile          # Configuración Docker
-├── docker-compose.yml  # Orquestación Docker
-└── README.md           # Este archivo
-```
-
-## 🔧 Desarrollo
-
-### Ejecutar Tests
-
-```bash
-# Con pytest
-pytest tests/ -v
-
-# O con el script
-python scripts/run_tests.py
-```
-
-### Formatear Código
-
-```bash
-# Con black
-black src/ tests/ examples/
-
-# Con ruff
-ruff check src/ tests/ examples/
-```
-
-### Linter
-
-```bash
-# Con flake8
-flake8 src/ tests/ examples/
-```
-
-## 📖 Documentación
-
-- [Arquitectura](docs/ARCHITECTURE.md) - Detalles de arquitectura del sistema
-- [Contributing](CONTRIBUTING.md) - Guía para contribuidores
-- [Changelog](CHANGELOG.md) - Historial de cambios
-- [LinkedIn MCP](https://linkedapi.io/mcp/) - Documentación oficial de LinkedIn MCP
-
-## 🐛 Troubleshooting
-
-### LinkedIn MCP no conecta
-
-```bash
-# Verificar que el servidor MCP está corriendo
-curl http://localhost:3000/health
-
-# Revisar logs del servidor MCP
-docker logs linkedin-mcp-server
-```
-
-### Error de API Key
-
-```bash
-# Verificar que las API keys están configuradas
-cat .env | grep API_KEY
-
-# Asegurarse de no tener espacios en blanco
-```
-
-### Tests fallan
-
-```bash
-# Asegurarse de estar en el entorno virtual
-source venv/bin/activate
-
-# Reinstalar dependencias
-pip install -r requirements.txt
-```
-
-## 🚧 Roadmap
-
-- [ ] Interfaz web (FastAPI + React)
-- [ ] Integración con más plataformas (Indeed, Glassdoor)
-- [ ] Base de datos PostgreSQL
-- [ ] Sistema de notificaciones
-- [ ] Dashboard de métricas
-- [ ] Análisis de mercado salarial
-- [ ] Integración con ATS
-- [ ] Modo batch para múltiples CVs
-
-## 🤝 Contribución
-
-¡Las contribuciones son bienvenidas! Por favor lee [CONTRIBUTING.md](CONTRIBUTING.md) para detalles.
-
-### Cómo Contribuir
-
-1. Fork el proyecto
-2. Crea una rama (`git checkout -b feature/nueva-feature`)
-3. Commit tus cambios (`git commit -m 'feat: add nueva feature'`)
-4. Push a la rama (`git push origin feature/nueva-feature`)
-5. Abre un Pull Request
-
-## 📝 Licencia
-
-Este proyecto está licenciado bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para detalles.
-
-## 🙏 Reconocimientos
-
-- [CrewAI](https://www.crewai.com/) - Framework de orquestación de agentes
-- [LinkedIn MCP](https://github.com/Linked-API/linkedapi-mcp) - Integración con LinkedIn
-- [LangChain](https://www.langchain.com/) - Framework de LLMs
-
-## 📧 Contacto
-
-- GitHub Issues: [Reportar bugs o sugerir features](https://github.com/yourusername/jobsearcher/issues)
-- Email: contact@jobsearcher.dev
+# JobSearcher — agente autónomo de búsqueda de empleo
+
+Sistema multi-agente en Python que **busca vacantes, las evalúa contra tu CV, aplica, monitorea respuestas de reclutadores y agenda entrevistas**, manteniendo siempre a un humano en el circuito vía WhatsApp para las decisiones importantes.
+
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-APScheduler-009688.svg)](https://fastapi.tiangolo.com/)
+[![Playwright](https://img.shields.io/badge/Playwright-browser-2EAD33.svg)](https://playwright.dev/)
+
+## Características
+
+- **Búsqueda zero-token** en APIs públicas de Greenhouse, Ashby y Lever (`portal_scanner`) + JobSpy (LinkedIn/Indeed/Glassdoor) como respaldo.
+- **Filtros gratuitos antes del LLM**: dedup en SQLite, detector de *ghost postings* (`liveness`), pre-gate por título y elegibilidad de ubicación.
+- **Scoring 0-100** de cada vacante contra el CV y contra tu empleo actual (solo pasa lo que es *mejor opción*).
+- **Aplicación automática**: LinkedIn Easy Apply, Indeed y ATS externos (Greenhouse/Lever/Ashby) leyendo el formulario por API y llenándolo por selector con Playwright.
+- **Gobernador anti-ban de LinkedIn**: un único *choke point* con presupuesto por acción y por cuenta, horario laboral, jitter, warmup y detección de restricciones.
+- **Monitoreo** de Gmail (30 min) y mensajes de LinkedIn; borradores de respuesta a reclutadores con aprobación humana.
+- **Calendario**: propone slots libres y crea eventos de entrevista en Google Calendar.
+- **Follow-ups** con cadencia diferenciada por estado del pipeline.
+- **Router de LLMs** con fallback en cascada (GLM → Groq → SambaNova → Ollama local).
+- **Dashboard web** y API REST para disparar cualquier tarea manualmente.
 
 ---
 
-⭐ Si te gusta este proyecto, ¡dame una estrella en GitHub!
+## Arquitectura
+
+### Vista general
+
+```mermaid
+flowchart LR
+    subgraph Fuentes["Fuentes de vacantes"]
+        GH[Greenhouse API]
+        AS[Ashby API]
+        LV[Lever API]
+        JS[JobSpy<br/>LinkedIn · Indeed · Glassdoor]
+    end
+
+    subgraph Core["Orchestrator (FastAPI + APScheduler · :8777)"]
+        SCH[Scheduler<br/>tareas periódicas]
+        API[REST API<br/>/trigger · /api · /dashboard]
+        MA[Master Agent<br/>scoring · cover letters · respuestas]
+        RA[Recruiter Agent]
+        EXT[External ATS Agent]
+        COORD[Coordinator<br/>router de LLMs]
+        GOV[LinkedIn Governor<br/>anti-ban]
+    end
+
+    subgraph LLMs["Proveedores LLM"]
+        GLM[GLM]
+        GROQ[Groq]
+        SN[SambaNova]
+        OLL[Ollama local]
+    end
+
+    subgraph Canales["Canales"]
+        LI[LinkedIn]
+        GM[Gmail]
+        CAL[Google Calendar]
+        WA[WhatsApp bridge<br/>Node.js · :3001]
+        ATS[Formularios ATS<br/>Playwright]
+    end
+
+    DB[(SQLite<br/>jobs · applications<br/>emails · conversations)]
+    USER((Candidato))
+
+    GH & AS & LV --> SCH
+    JS --> SCH
+    SCH --> MA
+    MA --> COORD
+    RA --> COORD
+    EXT --> COORD
+    COORD --> GLM & GROQ & SN & OLL
+    SCH --> RA & EXT
+    RA --> GOV --> LI
+    MA --> GOV
+    EXT --> ATS
+    SCH --> GM & CAL
+    MA & RA & EXT & SCH --> DB
+    API --> SCH
+    SCH <--> WA <--> USER
+```
+
+### Pipeline de una vacante
+
+Cada etapa barata corre antes que la siguiente más cara: el LLM solo ve vacantes que ya pasaron todos los filtros gratuitos.
+
+```mermaid
+flowchart TD
+    A[Vacante descubierta] --> B{¿Ya existe en DB?<br/>tracker.job_exists}
+    B -- sí --> X[Descartar]
+    B -- no --> C{¿Ghost posting / expirada?<br/>liveness.should_skip_job}
+    C -- sí --> X
+    C -- no --> D{¿Título fuera de perfil?<br/>pre-gate regex}
+    D -- sí --> X2[Score fijo ≤ 25<br/>sin LLM]
+    D -- no --> E{¿Elegible desde México?<br/>location gate}
+    E -- no --> X
+    E -- sí --> F[LLM: evaluate_job_match<br/>score 0-100 vs CV + empleo actual]
+    F --> G{score ≥ 75?}
+    G -- no --> H[Guardar en backlog]
+    G -- sí --> I[Notificar por WhatsApp]
+    I --> J{¿Aprobado?}
+    J -- no --> H
+    J -- sí --> K[Cover letter + aplicar]
+    K --> L{Tipo de aplicación}
+    L -- Easy Apply --> M[LinkedIn API<br/>vía Governor]
+    L -- ATS externo --> N[ats_forms lee formulario<br/>ats_filler llena por selector]
+    L -- Indeed --> O[indeed_apply]
+    M & N & O --> P[(applications)]
+    P --> Q[Monitoreo Gmail / LinkedIn]
+    Q --> R[Respuesta reclutador → borrador → aprobar → enviar]
+    R --> S[Agendar entrevista en Calendar]
+    Q --> T[Follow-up según cadencia]
+```
+
+### Aplicación a ATS externos
+
+En lugar de un loop de visión paso a paso, el formulario se lee estructuradamente desde la API pública del ATS, se responde una sola vez y se llena de forma determinista.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant EA as External ATS Agent
+    participant AF as ats_forms
+    participant MA as Master Agent (LLM)
+    participant FL as ats_filler (Playwright)
+    participant H as Humano (WhatsApp)
+    participant DB as SQLite
+
+    EA->>AF: URL de la vacante
+    AF->>AF: GET API del board (Greenhouse/Ashby/Lever)
+    AF-->>EA: ATSForm (campos, tipos, opciones)
+    EA->>MA: answer_application(form, CV)
+    MA-->>EA: respuestas por campo (nunca inventa: vacío si no sabe)
+    EA->>FL: fill(form, respuestas)
+    FL->>FL: text · textarea · file · React-Select · location
+    alt Código de verificación por email (anti-bot)
+        FL->>H: hand-off: introducir código
+    end
+    FL-->>EA: screenshot (modo assist) / submit
+    EA->>DB: registrar aplicación + resultado
+```
+
+### Gobernador anti-ban de LinkedIn
+
+LinkedIn banea por actividad **total** de la cuenta, no por script. Por eso **todo** acceso a LinkedIn pasa por un único módulo:
+
+```mermaid
+flowchart LR
+    subgraph Callers
+        A1[Easy Apply]
+        A2[Leer mensajes]
+        A3[Enviar mensaje]
+        A4[Conectar]
+        A5[Publicar]
+        A6[Buscar]
+    end
+    A1 & A2 & A3 & A4 & A5 & A6 --> G{"gov.can_act(ACTION)"}
+    G -- "fuera de horario / cap diario / gap mínimo / cuenta restringida" --> W[Esperar / saltar]
+    G -- ok --> L[Acción en LinkedIn<br/>User-Agent único · jitter]
+    L --> R["gov.record_action(ACTION)"]
+    R --> LED[(Ledger de acciones)]
+    LED --> G
+    HM[linkedin_health<br/>monitor de sesión] --> G
+```
+
+### Router de LLMs
+
+```mermaid
+flowchart LR
+    T[Tarea] --> Q{Tipo}
+    Q -- "calidad<br/>(cover letter, respuesta a reclutador, follow-up)" --> GLM
+    Q -- "volumen<br/>(job match, análisis de email, comandos)" --> GROQ
+    GLM -- error / rate limit --> GROQ
+    GROQ -- error / rate limit --> SN[SambaNova]
+    SN -- error --> OLL[Ollama local<br/>último recurso, sin costo]
+```
+
+### Tareas programadas
+
+| Tarea | Frecuencia | Qué hace |
+|---|---|---|
+| `portal_scan` | 4 h | Scan zero-token de Greenhouse/Ashby/Lever según `config/portals.yml` |
+| `job_search` | 8 h | Búsqueda JobSpy con filtro de liveness |
+| `external_ats` | periódica | Aplica a la cola de ATS externos |
+| `indeed_apply` | 3 h | Aplicación en Indeed |
+| `linkedin_messages` | 15 min (gateada por el governor) | Lee mensajes de reclutadores |
+| `email_monitor` | 30 min | Clasifica correos de Gmail |
+| `followup` | diaria | Follow-ups según cadencia por estado |
+| `score_pending` | periódica | Puntúa el backlog (con fallback a LLM local) |
+| `pipeline_health` / `linkedin_health` | periódica | Salud del pipeline y de la sesión |
+
+---
+
+## Estructura del repositorio
+
+```
+.
+├── run.py                    # Entry point: arranca el orchestrator (uvicorn :8777)
+├── config/
+│   ├── settings.py           # Configuración (pydantic-settings, lee .env)
+│   └── portals.yml           # Empresas a escanear + filtros de título/ubicación
+├── src/
+│   ├── orchestrator.py       # FastAPI + APScheduler + webhook WhatsApp
+│   ├── agents/               # master, recruiter, external_ats, coordinator, ...
+│   ├── tools/                # portal_scanner, jobspy, liveness, linkedin_governor,
+│   │                         # gmail, calendar, whatsapp, browser, ats_forms, ats_filler
+│   ├── db/tracker.py         # Capa SQLite
+│   └── dashboard.py          # Dashboard web
+├── services/whatsapp/        # Bridge Node.js (whatsapp-web.js)
+├── modes/                    # Instrucciones por modo para agentes de código (Claude Code)
+├── scripts/                  # Utilidades: scoring de backlog, generación de CV, etc.
+└── docs/                     # Documentación adicional
+```
+
+---
+
+## Instalación
+
+### Requisitos
+
+- Python 3.10+
+- Node.js 20+ (para el bridge de WhatsApp)
+- Chromium para Playwright
+- Al menos una API key de LLM (Groq tiene free tier) o [Ollama](https://ollama.com/) local
+
+### Pasos
+
+```bash
+git clone git@github.com:alejandro-loza/jobSearcher.git
+cd jobSearcher
+
+# Python
+python -m venv venv
+venv/bin/pip install -r requirements.txt playwright
+venv/bin/playwright install chromium
+
+# WhatsApp bridge
+cd services/whatsapp && npm install && cd ../..
+
+# Configuración
+cp .env.example .env                       # llena tus API keys
+cp modes/_profile.example.md modes/_profile.md
+mkdir -p data
+```
+
+### Datos locales (nunca se suben al repo)
+
+| Archivo | Contenido |
+|---|---|
+| `.env` | API keys y configuración |
+| `data/resume.json` | Tu CV estructurado (lo usa el scoring y los formularios) |
+| `data/current_job.json` | Empleo actual: línea base que toda vacante debe superar |
+| `data/*.pdf` | CV en PDF para adjuntar |
+| `config/google_credentials.json` | OAuth client de Google Cloud |
+| `config/gmail_token.json`, `config/calendar_token.json` | Tokens generados por `authorize_google.py` |
+| `config/linkedin_cookies.json` | Cookies de sesión de LinkedIn (`li_at`, `JSESSIONID`) |
+| `modes/_profile.md` | Tu perfil y preferencias para los agentes |
+
+Ejemplo de `data/current_job.json`:
+
+```json
+{
+  "empresa": "Empresa actual",
+  "rol": "Sr Software Engineer",
+  "compensacion": "$XX,000 MXN",
+  "modalidad": "Híbrida",
+  "ingreso": "2026-01-01"
+}
+```
+
+### Autorizar Google (Gmail + Calendar)
+
+1. Crea un OAuth client (Desktop) en Google Cloud Console y guárdalo como `config/google_credentials.json`.
+2. Ejecuta `venv/bin/python authorize_google.py` y acepta los permisos en el navegador.
+
+---
+
+## Uso
+
+```bash
+# 1. Bridge de WhatsApp (escanea el QR la primera vez)
+cd services/whatsapp && npm start
+
+# 2. Orchestrator
+venv/bin/python run.py
+```
+
+Abre el dashboard en `http://localhost:8777/dashboard`.
+
+### Disparadores manuales
+
+```bash
+curl -s  http://localhost:8777/health | python3 -m json.tool
+curl -X POST http://localhost:8777/trigger/portal-scan    # zero-token
+curl -X POST http://localhost:8777/trigger/search         # JobSpy
+curl -X POST http://localhost:8777/trigger/external-ats   # aplica a cola ATS
+curl -X POST http://localhost:8777/trigger/apply-all      # aplica a score ≥ 75
+curl -X POST http://localhost:8777/trigger/email          # monitor de Gmail
+```
+
+### API principal
+
+| Endpoint | Método | Descripción |
+|---|---|---|
+| `/health`, `/health/linkedin` | GET | Estado del sistema y de la sesión de LinkedIn |
+| `/dashboard` | GET | Dashboard web |
+| `/pipeline` | GET | Estado del pipeline |
+| `/api/jobs`, `/api/applications`, `/api/interviews` | GET | Datos del tracker |
+| `/api/chat` | POST | Chat con el agente |
+| `/trigger/*` | POST | Ejecuta una tarea al momento |
+| `/webhook/whatsapp` | POST | Comandos/aprobaciones desde WhatsApp |
+
+### Añadir empresas al portal scanner
+
+Edita `config/portals.yml`:
+
+```yaml
+tracked_companies:
+  - name: "Stripe"
+    careers_url: "https://boards.greenhouse.io/stripe"
+    ats_type: "greenhouse"
+    enabled: true
+```
+
+### Docker
+
+```bash
+docker compose up -d
+```
+
+---
+
+## Principios de diseño
+
+1. **Humano en el circuito**: ofertas, negociación salarial y aceptar/declinar siempre se escalan por WhatsApp; el sistema nunca decide solo.
+2. **Minimizar tokens**: filtros deterministas (dedup, liveness, regex de título, ubicación) antes de cualquier llamada al LLM.
+3. **Nunca inventar**: si el CV no responde un campo del formulario, se deja vacío y se pide intervención.
+4. **Un solo choke point para LinkedIn**: caps, horario y jitter viven solo en `linkedin_governor`.
+5. **Anti-spam**: nunca responder dos veces a un hilo sin respuesta del reclutador.
+
+## Seguridad
+
+El repositorio **no contiene** credenciales ni datos personales: `.env`, tokens, cookies, la base de datos y `data/` están en `.gitignore`. Antes de contribuir, revisa que tus cambios no incluyan llaves ni datos de contacto.
+
+## Aviso
+
+Automatizar acciones en LinkedIn puede violar sus Términos de Servicio. Úsalo bajo tu propio riesgo y con límites conservadores.

@@ -102,16 +102,28 @@ Locations: incluye "remote" y "Ciudad de Mexico" — el candidato prefiere remot
         }
 
 
-# Empleo ACTUAL de Alejandro — línea base que toda vacante nueva debe SUPERAR.
-# Aceptado jun-2026. Cambiar de trabajo solo tiene sentido si la nueva oferta es
-# una mejor opción que esto. Ver modes/_profile.md.
-CURRENT_JOB = {
-    "empresa": "ISOL (Ingeniería de Soluciones), colocado en cliente Liverpool (El Puerto de Liverpool)",
-    "rol": "Desarrollador Backend Java / Sr Software Engineer",
-    "compensacion": "~$50,000 MXN mixta (≈25k nómina formal IMSS + 25k asimilados)",
-    "modalidad": "Híbrida mixta: mitad presencial en CDMX, mitad remoto",
-    "ingreso": "16 jun 2026",
+# Empleo ACTUAL — línea base que toda vacante nueva debe SUPERAR.
+# Los datos reales viven en data/current_job.json (gitignored, no se publican).
+# Ver modes/_profile.md.
+_CURRENT_JOB_FILE = "data/current_job.json"
+_CURRENT_JOB_DEFAULT = {
+    "empresa": "(sin configurar)",
+    "rol": "(sin configurar)",
+    "compensacion": "(sin configurar)",
+    "modalidad": "(sin configurar)",
+    "ingreso": "",
 }
+
+
+def _load_current_job() -> Dict[str, str]:
+    try:
+        with open(_CURRENT_JOB_FILE, encoding="utf-8") as f:
+            return {**_CURRENT_JOB_DEFAULT, **json.load(f)}
+    except (OSError, ValueError):
+        return dict(_CURRENT_JOB_DEFAULT)
+
+
+CURRENT_JOB = _load_current_job()
 
 
 def evaluate_job_match(
@@ -276,7 +288,7 @@ Responde SOLO con JSON válido:
                 f"no supera al empleo actual → tope 55 (LLM dio {score})"
             )
             score = 55
-            reasons = f"[No supera al empleo actual ISOL/Liverpool] {reasons}"
+            reasons = f"[No supera al empleo actual] {reasons}"
 
         return score, reasons
     except Exception as e:
@@ -462,7 +474,7 @@ Reglas:
 - Para type 'select_multi': responde con una lista de 'options' (usa la moneda MXN si preguntan currency).
 - Para nivel de inglés: Alejandro es Avanzado-Professional → elige la opción más cercana (Advanced o Fluent).
 - Para preguntas de ensayo: 2-4 oraciones, concretas, primera persona, específicas al puesto/empresa y basadas SOLO en el CV real. Nada genérico, nada inventado.
-- Para expectativa salarial: apunta por encima de su empleo actual (~50k MXN mixto). Da un rango bruto mensual en MXN acorde a un rol senior (p.ej. "MXN 80,000–95,000, negociable").
+- Para expectativa salarial: apunta por encima de su empleo actual ({CURRENT_JOB['compensacion']}). Da un rango bruto mensual en MXN acorde a un rol senior (p.ej. "MXN 80,000–95,000, negociable").
 - Para experiencia en fintech: responde según el CV real (sé honesto).
 
 Responde SOLO JSON válido: {{"field_name": "respuesta", ...}} (listas para select_multi)."""

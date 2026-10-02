@@ -1012,10 +1012,10 @@ class JobTracker:
             ).fetchall()
             sent = conn.execute(
                 """SELECT body, 1 as from_me, subject,
-                          sent_at as ts, 'alejandrohloza@gmail.com' as from_address
+                          sent_at as ts, ? as from_address
                    FROM sent_emails WHERE thread_id = ?
                    ORDER BY sent_at ASC""",
-                (gmail_thread_id,),
+                (settings.gmail_my_email, gmail_thread_id),
             ).fetchall()
 
         all_msgs = [dict(r) for r in received] + [dict(r) for r in sent]
